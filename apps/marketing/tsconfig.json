@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@/*": ["./*"],
+      // The repo sits on an NTFS volume where symlinks are unsupported, so
+      // pnpm cannot create the usual node_modules/@receptionai/ui link. These
+      // mappings resolve the workspace package straight from source; the
+      // matching webpack aliases in next.config.mjs do the same at build time.
+      "@receptionai/ui": ["../../packages/ui/src/index.ts"],
+      "@receptionai/ui/styles/*": ["../../packages/ui/src/styles/*"],
+      "@receptionai/ui/tailwind-preset": ["../../packages/ui/tailwind-preset.ts"],
+      "@receptionai/ui/*": ["../../packages/ui/src/components/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

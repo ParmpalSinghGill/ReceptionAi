@@ -1,0 +1,15 @@
+{
+  "name": "receptionai",
+  "private": true,
+  "packageManager": "pnpm@10.32.1",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "pnpm --filter @receptionai/web dev",
+    "build": "pnpm --filter @receptionai/web build",
+    "lint": "pnpm --filter @receptionai/web lint",
+    "dev:marketing": "pnpm --filter @receptionai/marketing dev",
+    "build:marketing": "pnpm --filter @receptionai/marketing build",
+    "lint:marketing": "pnpm --filter @receptionai/marketing lint",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

@@ -1,0 +1,26 @@
+# Temporal dynamic config — local development.
+#
+# The auto-setup image expects this file at the path named by
+# DYNAMIC_CONFIG_FILE_PATH. Without it the server logs a warning on every
+# startup and falls back to defaults; providing it keeps local behaviour
+# explicit and matches the shape of the production config.
+
+# Contract §3 partitions task queues per workload class (bookings /
+# notifications / ingestion / voice) so a slow ingestion job cannot starve
+# booking confirmations. Locally each queue needs only one partition; the
+# default of 4 spreads a handful of dev tasks across pollers and makes
+# debugging needlessly confusing.
+matching.numTaskqueueReadPartitions:
+  - value: 1
+matching.numTaskqueueWritePartitions:
+  - value: 1
+
+# Namespace defaults. 7 days of retention is plenty locally and keeps the
+# volume small; production sets this per namespace.
+frontend.enableClientVersionCheck:
+  - value: true
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true   # dev only: makes newly registered search attributes usable at once
+
+limit.maxIDLength:
+  - value: 255    # workflow ids are {tenant_id}:{domain}:{entity_id} (contract §3)

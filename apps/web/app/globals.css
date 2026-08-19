@@ -1,0 +1,117 @@
+/* The design tokens are the FIRST import so every Tailwind utility below
+   resolves against them. This file adds no colour of its own. */
+/* Relative rather than the package name — see tailwind.config.ts: resolving
+   "@receptionai/ui/..." needs a workspace symlink, which NTFS/exFAT cannot
+   create. apps/marketing imports the same file the same way. */
+@import "../../../packages/ui/src/styles/tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    /* 2.4.11 Focus Not Obscured: the app header is sticky, so focusable
+       content needs room to clear it when tabbed to. */
+    scroll-padding-top: 5rem;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: var(--text-body-sm);
+    line-height: var(--text-body-lh);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* DESIGN.md §7: a visible 2px accent ring with a 2px offset on EVERY
+     interactive element. `focus-visible` rather than `focus` so a mouse
+     click does not leave a persistent ring, and it is declared globally so
+     no component can forget it. Never `outline: none` without a replacement. */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: var(--focus-ring-width) solid var(--accent);
+    outline-offset: var(--focus-ring-offset);
+    border-radius: var(--radius-input);
+  }
+
+  /* Numbers that update live must not jitter (DESIGN.md §2). */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: var(--fg);
+  }
+
+  /* 1.4.12 Text Spacing — no fixed heights on text containers, so a user
+     stylesheet raising line-height does not clip content. Enforced by
+     convention; this comment is the reminder at the top of the cascade. */
+}
+
+@layer components {
+  /* Wide content scrolls inside its own container; the page body never does
+     (1.4.10 Reflow).
+
+     `overflow-y: hidden` is not cosmetic. With only `overflow-x: auto` the
+     used value of `overflow-y` is `auto` too, and a scroll container's
+     *scrollable overflow region* still propagates to the ancestor's
+     scrollWidth — the page scrolls sideways even though this box has its own
+     scrollbar. Pinning the cross axis makes this a true containing scroll
+     container. Verified at 375px: page scrollWidth 517 → 375. */
+  .scroll-x {
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-width: 100%;
+  }
+
+  /* Tailwind's `.sr-only` is `position: absolute`, which resolves against the
+     nearest POSITIONED ancestor — often far up the tree. When the hidden text
+     is wider than that ancestor it extends the page's scroll width and the
+     body scrolls sideways, with nothing visible to explain why. Clamping the
+     box (rather than only clipping its paint) makes the utility safe wherever
+     it is used, instead of depending on every call site remembering to add
+     `relative`. Content stays fully readable to assistive tech. */
+  .sr-only {
+    max-width: 1px;
+    max-height: 1px;
+  }
+
+  .sr-only-focusable:not(:focus):not(:focus-within) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}
+
+/* ---------------------------------------------------------------------
+   The manifest form renderer emits a 12-column grid whose spans come from
+   the server (06 §9.4). Tailwind's JIT cannot generate `col-span-{dynamic}`
+   and inline styles cannot be responsive, so the span travels as a custom
+   property and this rule applies it — collapsing to full width below `md`,
+   which is what a 4-column manifest layout must do on a phone.
+
+   Declared in `utilities` and AFTER the layer, not in `components`: the field
+   wrapper also carries Tailwind's `col-span-12` (the mobile default), which
+   lives in the utilities layer and would otherwise win the cascade, leaving
+   every server-specified span rendering full width.
+   --------------------------------------------------------------------- */
+@layer utilities {
+  @media (min-width: 768px) {
+    [data-col-span] {
+      grid-column: span var(--col-span) / span var(--col-span);
+    }
+  }
+}

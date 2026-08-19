@@ -1,0 +1,183 @@
+{
+  "uid": "receptionai-overview",
+  "title": "ReceptionAi \u2014 Platform Overview",
+  "tags": [
+    "receptionai"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 3,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Voice session utilization (contract A7)",
+      "description": "Ratio of receptionai_voice_active_sessions to receptionai_voice_session_capacity. This is the HPA signal per 05 E19.4 \u2014 voice workers sit at 15-25% CPU while completely full, so CPU never fires.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "receptionai:voice_session_utilization",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "API request rate by status",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (http_status_code) (rate(http_server_duration_milliseconds_count[5m]))",
+          "legendFormat": "{{http_status_code}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "API latency p50 / p95 / p99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Tenant GUC violations (must stay 0)",
+      "description": "Contract 2.4 / A3.5: every request sets app.tenant_id via SET LOCAL. RLS fails closed, so a miss looks like empty results rather than an error \u2014 it needs a counter to be visible at all.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(receptionai_tenant_guc_missing_total[1h]))",
+          "legendFormat": "last 1h"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "title": "LLM traces \u2014 Langfuse",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Which agent ran, which tool fired, tokens and cost per turn\n\nPrometheus and Tempo answer *how slow* and *how many*. They do not carry prompts, completions, token counts or per-turn cost \u2014 05 \u00a7D14.5 forbids content on a span attribute, so the AI layer's detail lives in Langfuse instead.\n\n**Open Langfuse** at `http://localhost:$LANGFUSE_PORT` (`3110` by default; check `.env` \u2014 this stack may remap it) \u2014 traces are one per conversation turn, with a child span per graph node (`ai.node.*`), per model call (`llm.chat` / `llm.stream`) and per tool (`ai.tool.*`). Filter by `session_id` to see a whole conversation.\n\n_Prompt and completion text is **masked by default**. A tenant opts in via `tenant_settings` (namespace `observability`, key `tracing.capture`), bounded by `LANGFUSE_CAPTURE`._\n\n_Empty? Langfuse is optional \u2014 set `LANGFUSE_ENABLED=true` and the keys in `.env`, then restart the API._"
+      }
+    }
+  ]
+}

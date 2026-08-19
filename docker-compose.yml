@@ -1,0 +1,665 @@
+# ===========================================================================
+# ReceptionAi — full local stack (Core Contract §1, 05-PLATFORM §E18.4).
+#
+#   docker compose up -d          backing services only (works on a clean clone)
+#   docker compose --profile app up -d   + api / workers / media / web
+#
+# Why the split: the backing services are real infrastructure and come up on
+# any machine with Docker. The application services build from apps/, which is
+# Phase 1 work in progress — a compose file that cannot start because an app
+# has no source yet is a compose file developers stop trusting. Backing
+# services are the useful thing on day one, so they are the default.
+#
+# Every image is pinned by @sha256 digest (§E21.3). A mutable tag can be
+# re-pushed, so the image CI verified is not provably the image that runs.
+# tools/check_image_pinning.py fails the build on any unpinned reference.
+#
+# Versions match production majors deliberately (§E18.4): a local stack that
+# diverges from production is how "works on my machine" becomes a release
+# process.
+# ===========================================================================
+name: receptionai
+
+# --------------------------------------------------------------------------
+# Shared application environment. Anchored once so api, workers and media
+# cannot drift apart — three copies of a connection string is three chances to
+# fix a bug in two places.
+# --------------------------------------------------------------------------
+x-app-env: &app-env
+  ENV: local
+  LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+
+  # The app connects through pgbouncer as the UNPRIVILEGED role. Contract §2.5:
+  # the runtime role is not the table owner and has no BYPASSRLS, so RLS
+  # actually applies locally instead of silently doing nothing.
+  DATABASE_URL: postgresql+asyncpg://receptionai_app:${POSTGRES_PASSWORD:-localpass}@pgbouncer:5432/${POSTGRES_DB:-receptionai}
+  # Migrations run as the privileged role, and only ever here.
+  MIGRATION_DATABASE_URL: postgresql+asyncpg://receptionai_migrator:${POSTGRES_PASSWORD:-localpass}@postgres:5432/${POSTGRES_DB:-receptionai}
+
+  REDIS_URL: redis://redis:6379/0
+  TEMPORAL_HOST: temporal:7233
+  TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_BUCKET: ${S3_BUCKET:-receptionai-local}
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  OTEL_TRACES_SAMPLER: always_on
+  OTEL_PYTHON_LOG_CORRELATION: "true"
+
+  # §A3.5 — verify the tenant GUC is set on every session. Local defaults to
+  # true because the failure it catches (RLS returning zero rows because
+  # app.tenant_id was never set) is silent by construction.
+  VERIFY_TENANT_GUC: "true"
+
+x-app-build: &app-build
+  context: .
+  args:
+    GIT_SHA: ${GIT_SHA:-local}
+
+# Restart policy for long-running local services: come back after a laptop
+# sleep or a daemon restart, but never fight a deliberate `docker compose stop`.
+x-restart: &restart unless-stopped
+
+services:
+  # ======================================================== data services ===
+  postgres:
+    image: pgvector/pgvector:pg16@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+    command:
+      - postgres
+      # log_statement=all is a local-only debugging aid. It would be a PII
+      # disaster in production (§B6), which is exactly why it lives in this
+      # file and not in a shared config that could be promoted by accident.
+      - -c
+      - log_statement=all
+      - -c
+      - max_connections=200
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localpass}
+      POSTGRES_DB: ${POSTGRES_DB:-receptionai}
+      # Consumed by 01-roles.sql so no password literal lives in the SQL.
+      RECEPTIONAI_DB_PASSWORD: ${POSTGRES_PASSWORD:-localpass}
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs ONCE, on an empty data directory. `make reset` drops the volume,
+      # which is the only way to re-run these.
+      - ./infra/docker/init/01-roles.sql:/docker-entrypoint-initdb.d/01-roles.sql:ro
+      - ./infra/docker/init/02-extensions.sql:/docker-entrypoint-initdb.d/02-extensions.sql:ro
+    healthcheck:
+      # -U and -d are explicit: bare pg_isready reports ready during the init
+      # window, before the role scripts have run, and dependents then start
+      # against a database whose roles do not exist yet.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER:-postgres} -d ${POSTGRES_DB:-receptionai}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: *restart
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p2@sha256:122bac472cfb0b92dca81a72421c93c3c5a840899e2002690a39742427cfcd49
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: receptionai_app
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-localpass}
+      DB_NAME: ${POSTGRES_DB:-receptionai}
+      # transaction pooling is what production uses, so SET LOCAL semantics
+      # (§A3.5) get exercised locally rather than discovered in staging. This
+      # matters: a session-scoped SET would leak one tenant's id to the next
+      # checkout of the same connection.
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "500"
+      DEFAULT_POOL_SIZE: "40"
+      AUTH_TYPE: scram-sha-256
+      ADMIN_USERS: receptionai_app
+    ports: ["${PGBOUNCER_PORT:-6432}:5432"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=$$DB_PASSWORD psql -h 127.0.0.1 -p 5432 -U receptionai_app -d $$DB_NAME -c 'SELECT 1' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: *restart
+
+  redis:
+    image: redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 512mb
+      # allkeys-lru: Redis here is a cache, a rate limiter and a pub/sub bus
+      # (contract §1). Under memory pressure evicting the coldest key is right
+      # for all three; noeviction would start refusing writes and take rate
+      # limiting down with it.
+      - --maxmemory-policy
+      - allkeys-lru
+    ports: ["${REDIS_PORT:-6379}:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: *restart
+
+  # ====================================================== object storage ===
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594ad4122b7a78c6632788a989b96d9199b483d3bd71a5ceae73a922cdfa
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes: [miniodata:/data]
+    healthcheck:
+      # The live endpoint, not `mc ready`: mc is not on the PATH of the server
+      # image, so the documented `mc ready local` check fails permanently and
+      # every dependent hangs waiting for a healthy state that never arrives.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: *restart
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-10-08T09-37-26Z@sha256:c0d345a438dcac5677c1158e4ac46637069b67b3cc38e7b04c08cf93bdee4a62
+    depends_on:
+      minio: { condition: service_healthy }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-receptionai-local}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+        mc mb --ignore-existing local/receptionai-recordings
+        mc mb --ignore-existing local/receptionai-knowledge
+        # Versioning on recordings: a call recording deleted by a bug is
+        # unrecoverable and may be evidence. Knowledge sources are versioned
+        # because retrieval must be able to delete by version (VectorStorePort).
+        mc version enable local/receptionai-recordings
+        mc version enable local/receptionai-knowledge
+        echo "buckets ready"
+    restart: "no"
+
+  # ============================================================ temporal ===
+  # Temporal gets its OWN Postgres, deliberately. Sharing the application
+  # database couples two failure domains: Temporal's history tables are
+  # write-heavy and their vacuum behaviour would sit alongside tenant data,
+  # and a `make reset` of app data would destroy running workflow history.
+  temporal-postgres:
+    image: pgvector/pgvector:pg16@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+    environment:
+      POSTGRES_USER: ${TEMPORAL_POSTGRES_USER:-temporal}
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal}
+      POSTGRES_DB: temporal
+    volumes: [temporalpgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TEMPORAL_POSTGRES_USER:-temporal} -d temporal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: *restart
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2@sha256:b1edc1e20002d958c8182f2ae08dee877a125083683a627a44917683419ba6a8
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${TEMPORAL_POSTGRES_USER:-temporal}
+      POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal}
+      POSTGRES_SEEDS: temporal-postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      # Prometheus scrapes this (see prometheus-local.yml).
+      PROMETHEUS_ENDPOINT: 0.0.0.0:9090
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    volumes:
+      - ./infra/docker/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    depends_on:
+      temporal-postgres: { condition: service_healthy }
+    healthcheck:
+      # `temporal operator cluster health` — the modern CLI, present in this
+      # image. tctl is deprecated and absent from recent auto-setup builds, so
+      # the documented tctl check would never pass.
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: *restart
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2@sha256:28bb3ea5a6ea3e09f16b521f32ab727c96470f7f1e420c66a6cbfb02001a8aa2
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports: ["${TEMPORAL_UI_PORT:-8080}:8080"]
+    depends_on:
+      temporal: { condition: service_healthy }
+    restart: *restart
+
+  # ======================================================= observability ===
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.113.0@sha256:5ac3e0ba2b0bd00943d067e7d8c262fd75cbe85878e59fb9879cd3eb481c69ee
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infra/docker/otel/collector-local.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "${OTLP_GRPC_PORT:-4317}:4317"   # OTLP gRPC
+      - "${OTLP_HTTP_PORT:-4318}:4318"   # OTLP HTTP
+      - "8889:8889"                      # Prometheus exposition
+    depends_on:
+      tempo: { condition: service_started }
+      loki: { condition: service_started }
+    restart: *restart
+
+  prometheus:
+    image: prom/prometheus:v2.55.1@sha256:2659f4c2ebb718e7695cb9b25ffa7d6be64db013daba13e05c875451cf51b0d3
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=48h
+      - --web.enable-lifecycle
+      - --enable-feature=exemplar-storage      # links metrics to traces
+      - --web.enable-remote-write-receiver     # Tempo's span metrics land here
+    volumes:
+      - ./infra/docker/prometheus/prometheus-local.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/docker/prometheus/rules:/etc/prometheus/rules:ro
+      - promdata:/prometheus
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: *restart
+
+  tempo:
+    image: grafana/tempo:2.6.1@sha256:ef4384fce6e8ad22b95b243d8fc165628cda655376fd50e7850536ad89d71d50
+    command: ["-config.file=/etc/tempo.yaml"]
+    user: "0:0"   # needs to own /var/tempo; local-only convenience
+    volumes:
+      - ./infra/docker/tempo/tempo-local.yaml:/etc/tempo.yaml:ro
+      - tempodata:/var/tempo
+    ports: ["${TEMPO_PORT:-3200}:3200"]
+    restart: *restart
+
+  loki:
+    image: grafana/loki:3.2.1@sha256:09a53b4a4ff81ffcd8f13886df19d33fac7a8d3aaf952e3c7e66cbade5b2fc31
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    user: "0:0"   # needs to own /loki; local-only convenience
+    volumes:
+      - ./infra/docker/loki/loki-local.yaml:/etc/loki/local-config.yaml:ro
+      - lokidata:/loki
+    ports: ["${LOKI_PORT:-3100}:3100"]
+    restart: *restart
+
+  grafana:
+    image: grafana/grafana:11.3.1@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
+    environment:
+      # Anonymous admin is local-only. It exists so `make up` gives working
+      # dashboards with no login step; a login step is a step people skip, and
+      # then nobody looks at the dashboards.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_FEATURE_TOGGLES_ENABLE: traceToMetrics,traceqlEditor
+      GF_LOG_LEVEL: warn
+    volumes:
+      - ./infra/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["${GRAFANA_PORT:-3001}:3000"]
+    depends_on:
+      prometheus: { condition: service_started }
+      tempo: { condition: service_started }
+      loki: { condition: service_started }
+    restart: *restart
+
+  # ============================================================ langfuse ===
+  # LLM observability (contract §1 "swappable backends", 05 §D14).
+  #
+  # Self-hosted deliberately. Prompts and completions carry patient names,
+  # phone numbers and symptoms, and the whole point of choosing Langfuse over a
+  # hosted alternative was that this data never leaves the stack. It is
+  # MIT-licensed and ingests OTLP, so it composes with the collector already
+  # here rather than replacing it.
+  #
+  # Langfuse is OPTIONAL. With no keys set the application's tracer is a no-op
+  # and every other service behaves exactly as before; these containers simply
+  # sit idle. A clean clone does not need them.
+  #
+  # It gets its OWN Postgres, ClickHouse and Redis for the same reason Temporal
+  # does: separate failure domains. In particular the shared `redis` above runs
+  # `allkeys-lru`, and Langfuse's ingestion queues MUST run `noeviction` — an
+  # evicted queue key is a silently dropped trace, which is the one failure an
+  # observability system must not have.
+  langfuse-postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_USER: ${LANGFUSE_POSTGRES_USER:-langfuse}
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-langfuse}
+      POSTGRES_DB: ${LANGFUSE_POSTGRES_DB:-langfuse}
+    volumes: [langfusepgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_POSTGRES_USER:-langfuse}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: *restart
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.12@sha256:a65ca89ddbe8e04a05036dd7d7110a203256293b407b9359130ed5e4333f45ff
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuseclickhousedata:/var/lib/clickhouse
+      - langfuseclickhouselogs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: *restart
+
+  langfuse-redis:
+    image: redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    # noeviction, NOT the allkeys-lru the application Redis uses. Langfuse runs
+    # its ingestion queues here; evicting a queued event under memory pressure
+    # would drop a trace silently.
+    command:
+      - redis-server
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${LANGFUSE_REDIS_PASSWORD:-langfuseredis}
+    volumes: [langfuseredisdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${LANGFUSE_REDIS_PASSWORD:-langfuseredis} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: *restart
+
+  # Blob storage for large event payloads. Its own MinIO rather than the
+  # application's: Langfuse creates and manages its own bucket lifecycle, and
+  # pointing it at the bucket that holds call recordings mixes two retention
+  # policies in one namespace.
+  langfuse-minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594ad4122b7a78c6632788a989b96d9199b483d3bd71a5ceae73a922cdfa
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-langfuseminio}
+    volumes: [langfuseminiodata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: *restart
+
+  # Shared by the web and worker containers — they run the same image with the
+  # same configuration and differ only in entrypoint.
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3@sha256:138a5b510cd76262a2abb02af1ddc563105013fdc9a62e63ccce526140ad05ba
+    depends_on: &langfuse-deps
+      langfuse-postgres: { condition: service_healthy }
+      langfuse-clickhouse: { condition: service_healthy }
+      langfuse-redis: { condition: service_healthy }
+      langfuse-minio: { condition: service_healthy }
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://${LANGFUSE_POSTGRES_USER:-langfuse}:${LANGFUSE_POSTGRES_PASSWORD:-langfuse}@langfuse-postgres:5432/${LANGFUSE_POSTGRES_DB:-langfuse}
+      SALT: ${LANGFUSE_SALT:-localsalt}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-langfuseredis}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-langfuseminio}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+    restart: *restart
+
+  langfuse-web:
+    image: langfuse/langfuse:3@sha256:60a668b1dd06e2d9a034ba8b2ed5e84303e66c6202d76b288020059a755fd037
+    depends_on: *langfuse-deps
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_PORT:-3110}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-localnextauthsecret}
+      # Headless bootstrap. Without these, first use means clicking through a
+      # signup form and copying two keys by hand — a manual step that makes
+      # `make up` not actually produce a working stack, which is how a
+      # developer concludes tracing is broken when it was never set up.
+      # The keys here MUST match LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY in
+      # .env, which is what the application authenticates with.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-receptionai}
+      LANGFUSE_INIT_ORG_NAME: ReceptionAi
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-receptionai-local}
+      LANGFUSE_INIT_PROJECT_NAME: ReceptionAi Local
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-0000000000000000000000000000000000000000}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-0000000000000000000000000000000000000000}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-local@receptionai.test}
+      LANGFUSE_INIT_USER_NAME: Local Developer
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-localpassword}
+    ports: ["${LANGFUSE_PORT:-3110}:3000"]
+    healthcheck:
+      # Langfuse runs ClickHouse migrations on first boot, which takes a while
+      # on a cold volume — hence the long start_period. Without it `make up`
+      # reports a failed stack on the very first run and every run after is
+      # fine, which teaches people to ignore the exit code.
+      # `hostname -i`, not 127.0.0.1: the Next.js server binds the container's
+      # external interface only, so a loopback probe is refused and the service
+      # reports unhealthy while serving traffic perfectly well.
+      test: ["CMD-SHELL", "wget -q --spider http://$$(hostname -i):3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    restart: *restart
+
+  # ========================================================== migrations ===
+  # Profile-gated with the app: it builds from apps/ and runs Alembic, neither
+  # of which exists on a fresh clone. `make migrate` runs it explicitly.
+  migrate:
+    build:
+      <<: *app-build
+      dockerfile: infra/docker/api.Dockerfile
+      target: build
+    environment: *app-env
+    # Alembic connects with DATABASE_MIGRATION_URL — the privileged migrator
+    # role, never the app role (contract §2.5). env.py is expected to prefer it.
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    profiles: ["app", "migrate"]
+
+  # ========================================================= application ===
+  api:
+    build:
+      <<: *app-build
+      dockerfile: infra/docker/api.Dockerfile
+      target: build
+    environment: *app-env
+    command:
+      - python
+      - -m
+      - uvicorn
+      - apps.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    ports: ["${API_PORT:-8000}:8000"]
+    volumes:
+      # Bind-mounted for hot reload. The image still contains the code, so the
+      # container is runnable without the mount — the mount is a dev affordance,
+      # not a requirement.
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      pgbouncer: { condition: service_started }
+      redis: { condition: service_healthy }
+      temporal: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    profiles: ["app"]
+    restart: *restart
+
+  # Contract A1: realtime voice runs in its own process. A slow LLM call in a
+  # request handler head-of-line blocks audio frames on the same event loop,
+  # and voice scales on concurrent-call count while the API scales on RPS.
+  media:
+    build:
+      <<: *app-build
+      dockerfile: infra/docker/media.Dockerfile
+      target: build
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: receptionai-media
+    command: ["python", "-m", "apps.media.main"]
+    ports:
+      - "${MEDIA_PORT:-8100}:8100"
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+    depends_on:
+      redis: { condition: service_healthy }
+      temporal: { condition: service_healthy }
+    profiles: ["app"]
+    restart: *restart
+
+  # Contract §3: task queues are partitioned per workload class so a slow
+  # ingestion job cannot starve booking confirmations. One image, three
+  # deployments, TASK_QUEUE injected — matching how k8s runs them (§E18.2).
+  worker-bookings:
+    build: &worker-build
+      <<: *app-build
+      dockerfile: infra/docker/worker.Dockerfile
+      target: build
+    environment:
+      <<: *app-env
+      TASK_QUEUE: bookings
+    command: ["python", "-m", "apps.worker.main"]
+    volumes: &worker-volumes
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
+    profiles: ["app"]
+    restart: *restart
+
+  worker-ingestion:
+    build: *worker-build
+    environment:
+      <<: *app-env
+      TASK_QUEUE: ingestion
+    command: ["python", "-m", "apps.worker.main"]
+    volumes: *worker-volumes
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
+    profiles: ["app"]
+    restart: *restart
+
+  worker-notifications:
+    build: *worker-build
+    environment:
+      <<: *app-env
+      TASK_QUEUE: notifications
+    command: ["python", "-m", "apps.worker.main"]
+    volumes: *worker-volumes
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
+    profiles: ["app"]
+    restart: *restart
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      target: deps
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:${API_PORT:-8000}
+    command: ["pnpm", "dev"]
+    working_dir: /app
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:${API_PORT:-8000}
+      NODE_ENV: development
+      WATCHPACK_POLLING: "true"   # bind mounts on macOS/Windows miss inotify
+    ports: ["${WEB_PORT:-3000}:3000"]
+    volumes:
+      - ./apps/web:/app
+      # Anonymous volumes keep container-built artefacts from being shadowed
+      # by the host mount — node_modules built for Linux must not be replaced
+      # by a host macOS build.
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      api: { condition: service_started }
+    profiles: ["app", "web"]
+    restart: *restart
+
+volumes:
+  pgdata: {}
+  temporalpgdata: {}
+  redisdata: {}
+  miniodata: {}
+  promdata: {}
+  tempodata: {}
+  lokidata: {}
+  grafanadata: {}
+  langfusepgdata: {}
+  langfuseclickhousedata: {}
+  langfuseclickhouselogs: {}
+  langfuseredisdata: {}
+  langfuseminiodata: {}
+
+# Default bridge network is created implicitly as `receptionai_default`.
+# Services reach each other by service name; no host ports are needed for
+# inter-service traffic, and the published ports above are purely for the
+# developer's browser and psql/redis-cli.

@@ -1,0 +1,57 @@
+# Alert rules that run locally as well as in production, so a rule with a typo
+# in its expression fails on a developer's machine rather than staying silently
+# broken until the incident it was written for.
+groups:
+  - name: receptionai-voice
+    interval: 30s
+    rules:
+      # Contract A7: the HPA targets UTILIZATION as a ratio of the two gauges,
+      # never an absolute session count, which goes stale whenever pod
+      # resources change. The recording rule defines that ratio once so the
+      # alert and the HPA cannot drift apart.
+      - record: receptionai:voice_session_utilization
+        expr: >
+          sum by (pod) (receptionai_voice_active_sessions)
+          /
+          clamp_min(sum by (pod) (receptionai_voice_session_capacity), 1)
+
+      - alert: VoiceCapacitySaturated
+        expr: receptionai:voice_session_utilization > 0.85
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Voice pod {{ $labels.pod }} above 85% session capacity"
+          description: >
+            Scaling signal per contract A7 / 05 §E19.4. Voice workers sit at
+            15-25% CPU while completely full, so CPU-based autoscaling never
+            fires and this ratio is the only honest saturation signal.
+
+  - name: receptionai-api
+    interval: 30s
+    rules:
+      - alert: ApiHighErrorRate
+        expr: >
+          sum(rate(http_server_duration_milliseconds_count{http_status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_server_duration_milliseconds_count[5m])), 0.001)
+          > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "API 5xx rate above 5% for 5 minutes"
+
+  - name: receptionai-tenancy
+    interval: 60s
+    rules:
+      # A3.5 / contract §2.4: every request sets app.tenant_id via SET LOCAL.
+      # A query reaching the database without it is a tenancy bug, and RLS
+      # fails it closed (zero rows) rather than loudly — so it needs an alert
+      # to be visible at all. Verified locally: an unset GUC returns 0 rows.
+      - alert: TenantGucMissing
+        expr: increase(receptionai_tenant_guc_missing_total[10m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "A DB session ran without app.tenant_id set"
+          description: >
+            RLS fails closed, so this surfaces as mysteriously empty results
+            rather than an error. Treat as a correctness bug, not noise.

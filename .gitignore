@@ -1,0 +1,51 @@
+# --------------------------------------------------------------- secrets ---
+# .env holds real credentials once a developer adds provider keys. A committed
+# secret must be ROTATED, not deleted — the history keeps it — so the only
+# reliable control is never committing it. `.env.example` is the committed,
+# secret-free template and is explicitly re-included below.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/*.key
+secrets/
+
+# ---------------------------------------------------------------- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# ------------------------------------------------------------------ node ---
+node_modules/
+.next/
+.turbo/
+*.tsbuildinfo
+.pnpm-store/
+
+# ------------------------------------------------------------------ tools ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
+!.vscode/extensions.json
+
+# ------------------------------------------------------------------ local ---
+# Local compose overrides: docker compose reads this automatically, so it is a
+# per-developer escape hatch (different ports, extra services) that must not
+# become everyone's configuration.
+docker-compose.override.yml
+*.local.yml
+
+# Dev-server PIDs and logs from tools/dev.sh
+.run/

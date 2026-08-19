@@ -1,0 +1,442 @@
+# ===========================================================================
+# CI — the merge gate. 05-PLATFORM-SECURITY-OPS.md §E21.1.
+#
+# Job graph (jobs run in parallel; `needs` draws the only edges that matter):
+#
+#   lint ┐
+#   typecheck ┤
+#   unit ┼──> build
+#   integration ┤
+#   security ┘
+#
+# Every action is pinned to a full commit SHA, not a tag: `v4` is a moving
+# pointer and the action runs with this workflow's token (§E21.3).
+# tools/check_image_pinning.py enforces it, so a tag-pinned action fails the
+# lint job rather than being caught in review.
+# ===========================================================================
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  # One run per ref. Pushing twice cancels the stale run rather than paying for
+  # a result nobody will read.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read          # least privilege by default; jobs opt in to more
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.5.11"
+
+jobs:
+  # ------------------------------------------------------------------ lint ---
+  # Fast, no services, no network beyond the dependency install. This job is
+  # the one that fails most often, so it must fail in under two minutes.
+  lint:
+    name: lint & architecture rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        run: uv pip install --system -r pyproject.toml --extra dev
+
+      - run: ruff check --output-format=github .
+      - name: Format check
+        run: ruff format --check .
+
+      # ---- contract enforcement -------------------------------------------
+      # These are structural rules, not style. Each one exists because the
+      # failure it prevents is silent.
+
+      - name: Architecture rules (contract §9)
+        # core imports nothing; apps depend on packages, never the reverse;
+        # no vendor SDK outside providers/ | connectors/ | channels/.
+        run: python3 tools/check_layering.py
+
+      - name: UUIDv7 discipline (contract §6, amendment A2)
+        # A silent uuid4 fallback satisfies every test while destroying the
+        # index locality v7 was chosen for, and makes uuid7_timestamp()
+        # impossible. Surfaces months later as unexplained WAL volume.
+        run: python3 tools/check_uuid_usage.py
+
+      - name: Image & action pinning (§E21.3)
+        # A mutable tag can be re-pushed, so the image CI verified is not
+        # provably the image that runs.
+        run: python3 tools/check_image_pinning.py
+
+  # ------------------------------------------------------------- typecheck ---
+  typecheck:
+    name: typecheck (mypy --strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        run: uv pip install --system -r pyproject.toml --extra dev --extra providers
+
+      # Strict mode is configured in pyproject.toml. Ports are typed contracts
+      # (contract §5); an untyped adapter defeats the point of having them.
+      - name: mypy
+        run: mypy packages/ apps/
+
+  # ------------------------------------------------------------ unit tests ---
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        run: uv pip install --system -r pyproject.toml --extra dev --extra providers
+
+      # `if` rather than an unconditional run: tests/unit does not exist yet on
+      # a Phase 1 skeleton, and `pytest` exits 4 on a missing path, which would
+      # gate every PR on an empty directory. It becomes unconditional the
+      # moment the first unit test lands.
+      - name: pytest
+        run: |
+          if [ -d tests/unit ] && [ -n "$(find tests/unit -name 'test_*.py' -print -quit)" ]; then
+            pytest tests/unit -q --cov=packages --cov=apps --cov-report=xml
+          else
+            echo "::notice::no unit tests yet — skipping"
+          fi
+
+      - name: Upload coverage
+        if: hashFiles('coverage.xml') != ''
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: coverage-unit
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  # ----------------------------------------------- integration + RLS tests ---
+  integration:
+    name: integration & RLS isolation
+    runs-on: ubuntu-latest
+
+    # Postgres and Redis as SERVICE containers for the integration suite.
+    #
+    # Note the RLS suite does NOT use these: tests/rls/conftest.py spins its own
+    # PostgreSQL via testcontainers so it can run the real migration as the real
+    # privileged role and then connect as a non-owner without BYPASSRLS. That is
+    # the only configuration that proves anything — a suite running as the
+    # service container's superuser passes with RLS entirely absent. Docker is
+    # available on ubuntu-latest, so testcontainers works with no extra setup.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: receptionai_test
+          RECEPTIONAI_DB_PASSWORD: testpass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d receptionai_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        run: uv pip install --system -r pyproject.toml --extra dev --extra providers
+
+      # ---------------------------------------------------------------------
+      # Roles and extensions, exactly as docker-compose does it locally.
+      # Running the SAME scripts is the point: a local stack that diverges from
+      # CI is how "passes on my machine" becomes a merge argument.
+      #
+      # 01-roles.sql grants the migrator CREATEROLE and membership in
+      # receptionai_owner, and 02-extensions.sql pre-creates the extensions
+      # that need superuser. Without both, `alembic upgrade head` fails — all
+      # three failure modes were found by running it, not by reading it.
+      # ---------------------------------------------------------------------
+      - name: Create roles and extensions
+        env:
+          PGPASSWORD: testpass
+          RECEPTIONAI_DB_PASSWORD: testpass
+        run: |
+          psql -h localhost -U postgres -d receptionai_test -v ON_ERROR_STOP=1 \
+               -f infra/docker/init/01-roles.sql
+          psql -h localhost -U postgres -d receptionai_test -v ON_ERROR_STOP=1 \
+               -f infra/docker/init/02-extensions.sql
+
+      - name: Migrate
+        env:
+          # The privileged role, never the app role (contract §2.5).
+          MIGRATION_DATABASE_URL: postgresql+asyncpg://receptionai_migrator:testpass@localhost:5432/receptionai_test
+        run: alembic upgrade head
+
+      - name: Assert every persisted id is a UUIDv7 (§A1.0)
+        # The companion to tools/check_uuid_usage.py: the linter catches a v4
+        # in source, this catches a column default that was never wired to the
+        # generator. Both are needed — neither finds the other's bug.
+        env:
+          PGPASSWORD: testpass
+        run: |
+          BAD=$(psql -h localhost -U postgres -d receptionai_test -tAc "
+            SELECT coalesce(sum(c), 0) FROM (
+              SELECT count(*) AS c FROM conversations
+               WHERE substring(id::text FROM 15 FOR 1) <> '7'
+              UNION ALL
+              SELECT count(*) FROM turns
+               WHERE substring(id::text FROM 15 FOR 1) <> '7'
+              UNION ALL
+              SELECT count(*) FROM tenants
+               WHERE substring(id::text FROM 15 FOR 1) <> '7'
+            ) s;")
+          if [ "$BAD" != "0" ]; then
+            echo "::error::$BAD persisted ids are not UUIDv7 (contract §6 / A2)"
+            exit 1
+          fi
+          echo "all persisted ids are v7"
+
+      - name: Integration suite
+        env:
+          DATABASE_URL: postgresql+asyncpg://receptionai_app:testpass@localhost:5432/receptionai_test
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          if [ -d tests/integration ] && [ -n "$(find tests/integration -name 'test_*.py' -print -quit)" ]; then
+            pytest tests/integration -q --maxfail=1
+          else
+            echo "::notice::no integration tests yet — skipping"
+          fi
+
+      # ---------------------------------------------------------------------
+      # The suite that proves the core tenancy claim. Kept as its own step so a
+      # failure is unmistakable in the checks list. It never gets marked flaky
+      # and never gets skipped — if this fails, tenant data is not isolated.
+      # ---------------------------------------------------------------------
+      - name: RLS isolation suite — BLOCKING (contract §2)
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: pytest tests/rls -q
+
+  # -------------------------------------------------------------- security ---
+  security:
+    name: security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0        # gitleaks scans full history
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        run: uv pip install --system -r pyproject.toml --extra dev --extra providers
+
+      # Known-vulnerable dependencies (OWASP A06). Non-blocking for now because
+      # a transitive CVE with no patch available would block every unrelated PR;
+      # it reports into the log and is reviewed. Flip to blocking once the
+      # dependency set is stable and a suppression file exists.
+      - name: Dependency audit (pip-audit)
+        continue-on-error: true
+        run: |
+          uv pip install --system pip-audit
+          pip-audit --strict --progress-spinner off
+
+      # SAST. -ll = medium severity and above; the low band is almost entirely
+      # `assert` in tests and would train people to ignore the output.
+      - name: SAST (bandit)
+        run: |
+          uv pip install --system bandit[sarif]
+          bandit -r packages/ apps/ -ll -f sarif -o bandit.sarif || true
+
+      - name: Upload SARIF
+        if: hashFiles('bandit.sarif') != ''
+        uses: github/codeql-action/upload-sarif@f09c1c0a94de965c15400f5634aa42fac8fb8f88 # v3.27.5
+        with:
+          sarif_file: bandit.sarif
+        continue-on-error: true
+
+      # A committed secret must be rotated, not deleted — the history keeps it.
+      # Scanning the full history is the only version of this check that works.
+      - name: Secret scan (full history)
+        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3 # v2.3.7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      # IaC misconfiguration over infra/ — the compose file, Dockerfiles and
+      # (once they land) the k8s manifests.
+      - name: IaC scan (trivy config)
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          scan-type: config
+          scan-ref: infra
+          severity: HIGH,CRITICAL
+          exit-code: "0"       # report-only until the manifests are complete
+
+  # ----------------------------------------------------------------- build ---
+  # Gated on every other job: an image is only worth building if the code that
+  # goes into it passed. The matrix builds the three Python images in parallel.
+  build:
+    name: build ${{ matrix.component }} image
+    needs: [lint, typecheck, unit, integration, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, worker, media]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: .
+          file: infra/docker/${{ matrix.component }}.Dockerfile
+          target: runtime
+          # Build on PRs to prove the Dockerfile works; push only on main.
+          push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name != 'push' }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ github.event.repository.updated_at }}
+          # Scoped per component so three parallel builds do not evict each
+          # other's dependency layer.
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Scan image (trivy)
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Keyless signing: the signature is bound to this workflow's OIDC
+      # identity, so an admission policy can verify not just "signed" but
+      # "signed by ci.yml on main". No key material to store or rotate.
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        if: github.event_name == 'push'
+      - name: Sign image
+        if: github.event_name == 'push'
+        run: cosign sign --yes ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}@${{ steps.build.outputs.digest }}
+
+      - uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1.4.4
+        if: github.event_name == 'push'
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # ------------------------------------------------------------ compose CI ---
+  # The local stack is a deliverable, so it is tested like one. This catches
+  # the class of bug where a compose change validates but does not start —
+  # a bad healthcheck command, a missing init file, a broken volume path.
+  compose:
+    name: local stack starts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate compose config
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose --profile app config --quiet
+
+      - name: Start backing services
+        run: docker compose up -d --wait --wait-timeout 300
+
+      - name: Assert the contract's role separation (§2.5)
+        run: |
+          # The runtime role must not be a superuser and must not have
+          # BYPASSRLS. If this ever passes with rolbypassrls=t, every RLS
+          # policy in the system is decorative.
+          OUT=$(docker compose exec -T postgres psql -U postgres -d receptionai -tAc \
+            "SELECT rolsuper::text||','||rolbypassrls::text FROM pg_roles WHERE rolname='receptionai_app';")
+          echo "receptionai_app (super,bypassrls) = $OUT"
+          [ "$OUT" = "false,false" ] || { echo "::error::app role has excess privilege"; exit 1; }
+
+      - name: Assert extensions are present
+        run: |
+          docker compose exec -T postgres psql -U postgres -d receptionai -tAc \
+            "SELECT extname FROM pg_extension ORDER BY 1;" | tee /tmp/ext.txt
+          for e in vector pgcrypto btree_gist pg_trgm; do
+            grep -qx "$e" /tmp/ext.txt || { echo "::error::missing extension $e"; exit 1; }
+          done
+
+      - name: Show service state on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --tail 50
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans

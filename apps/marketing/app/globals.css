@@ -1,0 +1,40 @@
+/* Relative rather than the package specifier: PostCSS resolves @import on its
+   own and does not see the webpack aliases that stand in for the unavailable
+   node_modules symlink (see next.config.mjs). */
+@import "../../../packages/ui/src/styles/tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* A visible focus ring on every focusable element, including ones no
+     component wraps (skip link, in-prose anchors). DESIGN.md §7 forbids
+     removing the outline without a replacement, so this IS the replacement. */
+  :focus-visible {
+    outline: var(--focus-ring-width) solid var(--accent);
+    outline-offset: var(--focus-ring-offset);
+  }
+
+  /* Anchored sections must not hide under the sticky nav when jumped to. */
+  [id] {
+    scroll-margin-top: 88px;
+  }
+}

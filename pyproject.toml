@@ -1,0 +1,192 @@
+[project]
+name = "receptionai"
+version = "0.1.0"
+description = "Multi-tenant AI receptionist platform"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # --- API ---
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-multipart>=0.0.12",
+
+    # --- Persistence ---
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "pgvector>=0.3.6",
+
+    # --- Cache / bus ---
+    "redis[hiredis]>=5.2.0",
+
+    # --- Durable execution ---
+    "temporalio>=1.8.0",
+
+    # --- Auth ---
+    "pyjwt[crypto]>=2.10.0",
+    "argon2-cffi>=23.1.0",
+
+    # --- IDs: contract A2. uuid6 backport; stdlib uuid.uuid7 on 3.14+. ---
+    "uuid6>=2024.7.10",
+
+    # --- AI ---
+    "langgraph>=0.2.45",
+    "langchain-core>=0.3.15",
+
+    # --- Observability ---
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+    "opentelemetry-instrumentation-asyncpg>=0.49b0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.28.0",
+    "prometheus-client>=0.21.0",
+    "structlog>=24.4.0",
+
+    # --- HTTP ---
+    "httpx>=0.27.2",
+
+    # --- Tool argument validation (03 §6.1) ---
+    # Every registered tool's parameters are a draft 2020-12 JSON Schema, checked
+    # at registration and enforced on every call. Not optional: a tool schema
+    # that is never validated is a tool schema that is wrong.
+    "jsonschema>=4.23.0",
+]
+
+[project.optional-dependencies]
+# Vendor SDKs live here, never in the base dependency set. A package that
+# imports one outside providers/ | connectors/ | channels/ fails tools/check_layering.py.
+providers = [
+    "openai>=1.54.0",
+    "anthropic>=0.39.0",
+]
+# LLM observability. Optional on purpose: `TracingPort` falls back to a no-op
+# when the package is absent, so a clean clone runs the full stack without it
+# and nothing in `packages/ai` imports it. Pinned below 4 because the adapter is
+# written against the v3 observation API (`start_as_current_observation`).
+observability = [
+    "langfuse>=3.15.0,<4",
+]
+# Realtime voice. Installed for `apps/media` only — the API and worker tiers do
+# not import Pipecat, and it pulls onnxruntime/numba, which is a large and slow
+# dependency to force on every deployment that never answers a phone call.
+voice = [
+    "pipecat-ai[deepgram,silero,webrtc,runner]>=1.4.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "testcontainers[postgres,redis]>=4.8.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+    "types-redis",
+    # The tenant-isolation tests read the database directly as the superuser,
+    # deliberately bypassing the app: asking the app whether a row is
+    # unreachable would be circular. That path is sync, hence psycopg2 in
+    # addition to asyncpg.
+    "psycopg2-binary>=2.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["packages", "apps"]
+
+# ---------------------------------------------------------------- ruff ----
+[tool.ruff]
+line-length = 96
+target-version = "py312"
+src = ["packages", "apps", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle / pyflakes
+    "I",                # isort
+    "N",                # pep8-naming
+    "UP",               # pyupgrade
+    "B",                # bugbear
+    "S",                # bandit (security)
+    "ASYNC",            # async correctness
+    "T20",              # no print()
+    "RUF",
+]
+ignore = [
+    "S101",   # assert: used in tests and in startup invariants
+    "B008",   # function call in default arg: this is the FastAPI Depends idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S311"]
+
+# DDL is composed from module-level constants (`_ROLES`, table lists), never
+# from request data. Identifiers cannot be bound as parameters in Postgres, so
+# f-strings are the only way to write DDL. Each site was read and confirmed
+# unreachable from user input before this was added — S608 is suppressed here
+# by inspection, not by convenience.
+"migrations/versions/*.py" = ["S608", "RUF002"]
+"tests/rls/test_rls_coverage.py" = ["S608"]
+
+# The booking repository composes three queries from module-level literal
+# fragments (`_BOOKING_SELECT` plus a fixed WHERE clause chosen from a closed
+# set). Every caller-supplied value travels as a bound parameter — checked by
+# inspection at each site, which also carries a comment saying so. A noqa cannot
+# be placed on the offending line because it falls inside the SQL string itself.
+"packages/persistence/repositories/booking.py" = ["S608"]
+
+# `PgUUID` is the conventional alias for sqlalchemy.dialects.postgresql.UUID,
+# distinguishing it from the stdlib `uuid.UUID` imported alongside it. N811
+# reads the uppercase original as a constant; it is a type.
+"packages/persistence/models/*.py" = ["N811"]
+# The CI enforcement gates are standalone CLI scripts whose entire output
+# contract is stdout/stderr — a check that cannot report what it found is a
+# check nobody can act on. T20 (no print) is aimed at library and application
+# code, where a stray print bypasses structured logging; it does not apply to
+# argv-in, exit-code-out tools. Scoped to tools/ rather than waived globally.
+"tools/**" = ["T201"]
+
+# `tools/verify_booking.py` is a developer smoke harness: it drives the LOCAL
+# API over http://localhost and shells out to the local compose stack. Each
+# finding below was read and confirmed unreachable from user input before being
+# suppressed — the URL is a module constant, the SQL interpolates a module
+# constant, and the subprocess argv is a fixed list.
+#   S310 urllib on a constant localhost URL, never a user-supplied scheme
+#   S603/S607 fixed `docker compose` argv, no shell, no untrusted input
+#   S608 the only interpolated value is CUSTOMER, a module constant
+#   RUF001 the DSML delimiter it asserts on is genuinely a fullwidth pipe
+"tools/verify_booking.py" = ["S310", "S603", "S607", "S608", "RUF001"]
+"tools/verify_emergency.py" = ["S310", "S603", "S607", "S608", "RUF001"]
+
+# Contract §9: core imports nothing from other packages.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"packages.persistence".msg = "core must not import persistence (contract §9)"
+"packages.ai".msg = "core must not import ai (contract §9)"
+"packages.providers".msg = "core must not import providers (contract §9)"
+
+# ---------------------------------------------------------------- mypy ----
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["temporalio.*", "langgraph.*", "pgvector.*", "uuid6.*"]
+ignore_missing_imports = true
+
+# -------------------------------------------------------------- pytest ----
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Session-scoped async fixtures (the migrated container, its engines) must
+# share one loop with the tests that use them, or asyncpg connections created
+# on the fixture loop are awaited on a different, already-closed one.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+markers = [
+    "integration: requires Postgres/Redis (testcontainers)",
+    "rls: tenant-isolation proofs; these gate merges",
+]

@@ -1,0 +1,520 @@
+/* =========================================================================
+   ReceptionAi design tokens — the single source of truth for apps/marketing
+   and apps/web. Values come from packages/ui/DESIGN.md §1. If a component in
+   either app hardcodes a hex value, it is wrong.
+
+   Theme resolution follows the rule in DESIGN.md §1 and 06 §12.1: the media
+   query covers the OS setting, the [data-theme] scope covers the in-app
+   toggle, and the :not() guard lets an explicit stamp beat the OS in BOTH
+   directions.
+   ========================================================================= */
+
+:root {
+  color-scheme: dark;
+
+  /* --- Surfaces (DESIGN.md §1) --------------------------------------- */
+  --bg: #0b1f1c;
+  --bg-raised: #102a26;
+  --bg-header: #0e2521;
+  --bg-inset: #0a1a17;
+  --border: #1c3b35;
+  --border-strong: #2a544b;
+
+  /* --- Foreground ---------------------------------------------------- */
+  --fg: #e8f2ef;
+  --fg-muted: #9fb8b2;
+  --fg-subtle: #7a9891;
+
+  /* --- Accent -------------------------------------------------------- */
+  --accent: #3ddca6;
+  --accent-hover: #5ce8b8;
+  --accent-press: #2bc08c;
+  --accent-fg: #062b21;
+  --accent-dim: #1e4d42;
+  --live: #3ddca6;
+
+  /* --- Status. Never colour alone (DESIGN.md §7). --------------------- */
+  --ok: #3ddca6;
+  --warn: #e8c468;
+  --danger: #e87d7d;
+  --info: #6fb3d9;
+
+  /* Readable text tints of the status hues, for use ON --bg / --bg-raised. */
+  --ok-fg: #3ddca6;
+  --warn-fg: #e8c468;
+  --danger-fg: #e87d7d;
+  --info-fg: #6fb3d9;
+  /* Low-emphasis fills; text on these uses the *-fg tokens above. */
+  --ok-dim: #133a30;
+  --warn-dim: #3a3320;
+  --danger-dim: #3d2525;
+  --info-dim: #17303d;
+  /* Text ON a SOLID status fill. Distinct from --*-fg, which is a readable TINT
+     of the status hue for use on --bg / --bg-raised. On dark themes those two
+     jobs want opposite values: using the tint on a solid fill puts #e87d7d on
+     #e87d7d — contrast 1.00, an invisible label. */
+  --ok-on: #062b21;
+  --warn-on: #2e2205;
+  --danger-on: #3a0f0f;
+  --info-on: #06222f;
+
+  /* --- Focus (DESIGN.md §7: 2px ring, 2px offset, always visible) ----- */
+  --ring: var(--accent);
+  --ring-offset: var(--bg);
+
+  /* --- Radius (DESIGN.md §3) ----------------------------------------- */
+  --radius-input: 8px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+
+  /* --- Motion (DESIGN.md §4) ----------------------------------------- */
+  --dur-micro: 120ms;
+  --dur-standard: 200ms;
+  --dur-overlay: 320ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Long-form aliases. Both spellings resolve so a component written against
+     either name themes correctly; the reduced-motion block below zeroes the
+     `--dur-*` originals, which these inherit. */
+  --duration-micro: var(--dur-micro);
+  --duration-standard: var(--dur-standard);
+  --duration-overlay: var(--dur-overlay);
+
+  /* --- Elevation. Borders do the work; shadows only on overlays. ------ */
+  --shadow-overlay: 0 16px 48px -12px rgb(0 0 0 / 0.6);
+  --scrim: rgb(0 0 0 / 0.62);
+
+  /* --- Type (DESIGN.md §2) ------------------------------------------- */
+  --font-display: var(--font-instrument-serif), "Instrument Serif", Georgia, serif;
+  --font-sans: var(--font-inter), Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), "JetBrains Mono", ui-monospace, monospace;
+
+  /* =====================================================================
+     Chart tokens (06 §12.1).
+
+     06 §12.1's literal hexes are a neutral-surface palette; DESIGN.md is
+     binding and the portal's surfaces carry the teal hue, so the eight
+     categorical slots are re-stepped to sit ON --bg-raised while preserving
+     06's actual REQUIREMENTS: fixed slot order, never cycled, distinguishable
+     under CVD, and the same hue family across themes rather than a filter
+     flip. Slot 1 is the brand accent so the primary series is always the
+     DESIGN.md accent (per the dataviz brief).
+
+     These values were COMPUTED, not eyeballed. Every slot was generated in
+     OKLCH and run through the dataviz validator (Machado-Oliveira-Fernandes
+     2009 CVD simulation at severity 1.0) against the real surfaces:
+
+       dark  on #102a26 and #0b1f1c — all six checks PASS.
+                worst adjacent CVD ΔE 13.1 (deutan), normal-vision ΔE 17.8,
+                all six >= 3:1 contrast.
+       light on #ffffff and #f4f8f7 — all six checks PASS, no WARN.
+                worst adjacent CVD ΔE 19.2 (deutan), normal-vision ΔE 21.1,
+                all six >= 3:1 contrast.
+
+     Because contrast PASSES rather than merely warning, the accessible table
+     view under every chart is a genuine second channel rather than the
+     mandatory relief for a failed check — but it ships regardless, because a
+     screen-reader user cannot read an <svg> of <path> elements at all.
+
+     ALL-PAIRS CAP (scatter, bubble, small multiples — where any two marks can
+     sit adjacent): dark clears all-pairs on slots 1-3; LIGHT DOES NOT — slot 3
+     against slot 1 collapses to ΔE 4.1 under protanopia. In those forms use
+     slots 1, 2 and 4 (validated all-pairs in both modes) and fold the rest
+     into "Other" or facet. lib/charts/series.ts enforces this.
+     ===================================================================== */
+  --chart-surface: var(--bg-raised);
+  --chart-grid: #1c3b35;
+  --chart-axis: #9fb8b2;
+
+  /* Slot 1 is hue 165 — the brand accent's family — so the primary series is
+     always recognisably the ReceptionAi teal, stepped to L 0.66 so it clears
+     the dark lightness band the raw --accent (L 0.80) sits above. */
+  --chart-1: #00b079; /* teal   — primary series */
+  --chart-2: #4b99d7; /* blue   */
+  --chart-3: #be8800; /* amber  */
+  --chart-4: #a37ecd; /* violet */
+  --chart-5: #e36654; /* coral  */
+  --chart-6: #00a8a9; /* cyan   */
+  /* Slots 7-8 are declared for completeness but the portal never reaches
+     them: past six series a chart folds into "Other" or facets. */
+  --chart-7: #d78bc0; /* magenta */
+  --chart-8: #8fa5b8; /* slate   */
+
+  /* Sequential ramp (heatmaps): one hue, ordered. Never categorical. */
+  --chart-seq-1: #123a33;
+  --chart-seq-2: #1a5a4c;
+  --chart-seq-3: #217a66;
+  --chart-seq-4: #2c9d81;
+  --chart-seq-5: #3ddca6;
+
+  /* Status colours are RESERVED (06 §12.1). They never become "series 4",
+     because a chart where series 4 is red and a chart where red means
+     "failing" cannot coexist without teaching people to misread both. */
+  --status-good: var(--ok);
+  --status-warning: var(--warn);
+  --status-serious: #e8a05c;
+  --status-critical: var(--danger);
+
+  /* =====================================================================
+     Type scale (DESIGN.md §2). Hero and stat numerals are fluid so the
+     serif display sizes hold their proportion from 375px to 1440px without
+     a stack of breakpoint overrides.
+     ===================================================================== */
+  --text-hero: clamp(2.5rem, 1.6rem + 4.2vw, 4.75rem); /* 40 → 76px */
+  --text-hero-lh: 1.05;
+  --text-page-title: 1.875rem; /* 30px */
+  --text-section: 1.25rem; /* 20px */
+  --text-body: 1rem; /* 16px */
+  --text-body-sm: 0.9375rem; /* 15px */
+  --text-body-lh: 1.6;
+  --text-label: 0.6875rem; /* 11px */
+  --text-label-tracking: 0.08em;
+  --text-stat: clamp(2.25rem, 1.7rem + 1.9vw, 2.75rem); /* 36 → 44px */
+
+  /* --- Spacing scale (DESIGN.md §6) ---------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  /* --- Layout (DESIGN.md §6) ----------------------------------------- */
+  --width-content: 1200px;
+  --width-prose: 68ch;
+
+  /* --- Motion, continued (DESIGN.md §4) ------------------------------
+     The live dot's 2s loop. Collapsed to 0ms under reduced motion below,
+     so a component reading this token gets the static dot for free. */
+  --pulse-duration: 2s;
+
+  /* --- Focus geometry (DESIGN.md §7) --------------------------------- */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------
+   LIGHT THEME. Surfaces invert but keep the hue — a light theme that goes
+   to neutral grey stops reading as the same product. The accent is
+   unchanged (DESIGN.md §1) and --accent-fg stays dark on it: white on
+   --accent fails contrast and is banned in §7.
+   --------------------------------------------------------------------- */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+
+    --bg: #f4f8f7;
+    --bg-raised: #ffffff;
+    --bg-header: #ffffff;
+    --bg-inset: #e9f0ee;
+    --border: #d3e2de;
+    --border-strong: #a9c5be;
+
+/* Text ON a solid status fill (see the dark block for why this is separate
+   from --*-fg). The light fills are dark enough that white passes. */
+--ok-on: #ffffff;
+--warn-on: #2e2205;
+--danger-on: #ffffff;
+--info-on: #ffffff;
+    --fg: #08211d;
+    --fg-muted: #3f5a55;
+    --fg-subtle: #5c7772;
+
+    --accent: #0b6f4f;
+    --accent-hover: #096043;
+    --accent-press: #075034;
+    --accent-fg: #ffffff;
+    --accent-dim: #d3f0e4;
+    --live: #0b6f4f;
+
+    --ok: #0b6f4f;
+    --warn: #8a6600;
+    --danger: #b3403f;
+    --info: #1e6d9c;
+
+    --ok-fg: #0b6f4f;
+    --warn-fg: #6f5200;
+    --danger-fg: #9c3535;
+    --info-fg: #175878;
+    --ok-dim: #d9f2e7;
+    --warn-dim: #f8eed3;
+    --danger-dim: #f8dedd;
+    --info-dim: #dceaf4;
+
+    --ring-offset: var(--bg);
+    --shadow-overlay: 0 16px 48px -12px rgb(8 33 29 / 0.18);
+  --scrim: rgb(8 33 29 / 0.42);
+    --scrim: rgb(8 33 29 / 0.42);
+
+    --chart-grid: #dde8e5;
+    --chart-axis: #3f5a55;
+
+    --chart-1: #00693a; /* teal   — primary series */
+    --chart-2: #2e82c0; /* blue   */
+    --chart-3: #815e00; /* amber  */
+    --chart-4: #773bac; /* violet */
+    --chart-5: #a50000; /* coral  */
+    --chart-6: #009699; /* cyan   */
+    --chart-7: #a63f83;
+    --chart-8: #4d6470;
+
+    --chart-seq-1: #d9f2e7;
+    --chart-seq-2: #96dcc0;
+    --chart-seq-3: #4fbd94;
+    --chart-seq-4: #17966c;
+    --chart-seq-5: #0b6047;
+
+    --status-serious: #b35a12;
+  }
+}
+
+/* The explicit in-app stamp. Duplicated rather than @apply-ed so it wins
+   over the media query in BOTH directions — a user who picks light on an
+   OS-dark machine gets light, and vice versa. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f8f7;
+  --bg-raised: #ffffff;
+  --bg-header: #ffffff;
+  --bg-inset: #e9f0ee;
+  --border: #d3e2de;
+  --border-strong: #a9c5be;
+
+/* Text ON a solid status fill (see the dark block for why this is separate
+   from --*-fg). The light fills are dark enough that white passes. */
+--ok-on: #ffffff;
+--warn-on: #2e2205;
+--danger-on: #ffffff;
+--info-on: #ffffff;
+  --fg: #08211d;
+  --fg-muted: #3f5a55;
+  --fg-subtle: #5c7772;
+
+  --accent: #0b6f4f;
+  --accent-hover: #096043;
+  --accent-press: #075034;
+  --accent-fg: #ffffff;
+  --accent-dim: #d3f0e4;
+  --live: #0b6f4f;
+
+  --ok: #0b6f4f;
+  --warn: #8a6600;
+  --danger: #b3403f;
+  --info: #1e6d9c;
+
+  --ok-fg: #0b6f4f;
+  --warn-fg: #6f5200;
+  --danger-fg: #9c3535;
+  --info-fg: #175878;
+  --ok-dim: #d9f2e7;
+  --warn-dim: #f8eed3;
+  --danger-dim: #f8dedd;
+  --info-dim: #dceaf4;
+
+  --ring-offset: var(--bg);
+  --shadow-overlay: 0 16px 48px -12px rgb(8 33 29 / 0.18);
+  --scrim: rgb(8 33 29 / 0.42);
+
+  --chart-grid: #dde8e5;
+  --chart-axis: #3f5a55;
+
+  --chart-1: #00693a; /* teal   — primary series */
+  --chart-2: #2e82c0; /* blue   */
+  --chart-3: #815e00; /* amber  */
+  --chart-4: #773bac; /* violet */
+  --chart-5: #a50000; /* coral  */
+  --chart-6: #009699; /* cyan   */
+  --chart-7: #a63f83;
+  --chart-8: #4d6470;
+
+  --chart-seq-1: #d9f2e7;
+  --chart-seq-2: #96dcc0;
+  --chart-seq-3: #4fbd94;
+  --chart-seq-4: #17966c;
+  --chart-seq-5: #0b6047;
+
+  --status-serious: #b35a12;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* ---------------------------------------------------------------------
+   SCOPED themes. The [data-theme] rules above are :root-anchored, which is
+   right for the app-wide toggle but cannot express "this panel is light
+   while the page is dark" — exactly what the /preview gallery needs to show
+   both themes at a glance. These unanchored selectors re-declare the same
+   values for any element, so a wrapper div can flip the theme for its
+   subtree. Declared last, so for :root they simply restate what the
+   :root[data-theme] rules already won.
+   --------------------------------------------------------------------- */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f8f7;
+  --bg-raised: #ffffff;
+  --bg-header: #ffffff;
+  --bg-inset: #e9f0ee;
+  --border: #d3e2de;
+  --border-strong: #a9c5be;
+
+/* Text ON a solid status fill (see the dark block for why this is separate
+   from --*-fg). The light fills are dark enough that white passes. */
+--ok-on: #ffffff;
+--warn-on: #2e2205;
+--danger-on: #ffffff;
+--info-on: #ffffff;
+  --fg: #08211d;
+  --fg-muted: #3f5a55;
+  --fg-subtle: #5c7772;
+
+  --accent: #0b6f4f;
+  --accent-hover: #096043;
+  --accent-press: #075034;
+  --accent-fg: #ffffff;
+  --accent-dim: #d3f0e4;
+  --live: #0b6f4f;
+
+  --ok: #0b6f4f;
+  --warn: #8a6600;
+  --danger: #b3403f;
+  --info: #1e6d9c;
+
+  --ok-fg: #0b6f4f;
+  --warn-fg: #6f5200;
+  --danger-fg: #9c3535;
+  --info-fg: #175878;
+  --ok-dim: #d9f2e7;
+  --warn-dim: #f8eed3;
+  --danger-dim: #f8dedd;
+  --info-dim: #dceaf4;
+
+  --ring-offset: var(--bg);
+  --shadow-overlay: 0 16px 48px -12px rgb(8 33 29 / 0.18);
+  --scrim: rgb(8 33 29 / 0.42);
+
+  --chart-grid: #dde8e5;
+  --chart-axis: #3f5a55;
+
+  --chart-1: #00693a; /* teal   — primary series */
+  --chart-2: #2e82c0; /* blue   */
+  --chart-3: #815e00; /* amber  */
+  --chart-4: #773bac; /* violet */
+  --chart-5: #a50000; /* coral  */
+  --chart-6: #009699; /* cyan   */
+  --chart-7: #a63f83;
+  --chart-8: #4d6470;
+
+  --chart-seq-1: #d9f2e7;
+  --chart-seq-2: #96dcc0;
+  --chart-seq-3: #4fbd94;
+  --chart-seq-4: #17966c;
+  --chart-seq-5: #0b6047;
+
+  --status-serious: #b35a12;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0b1f1c;
+  --bg-raised: #102a26;
+  --bg-header: #0e2521;
+  --bg-inset: #0a1a17;
+  --border: #1c3b35;
+  --border-strong: #2a544b;
+
+/* Text ON a SOLID status fill. Distinct from --*-fg, which is a readable TINT
+   of the status hue for use on --bg / --bg-raised. On dark themes those two
+   jobs want opposite values: using the tint on a solid fill puts #e87d7d on
+   #e87d7d — contrast 1.00, an invisible label. */
+--ok-on: #062b21;
+--warn-on: #2e2205;
+--danger-on: #3a0f0f;
+--info-on: #06222f;
+  --fg: #e8f2ef;
+  --fg-muted: #9fb8b2;
+  --fg-subtle: #7a9891;
+
+  --accent: #3ddca6;
+  --accent-hover: #5ce8b8;
+  --accent-press: #2bc08c;
+  --accent-fg: #062b21;
+  --accent-dim: #1e4d42;
+  --live: #3ddca6;
+
+  --ok: #3ddca6;
+  --warn: #e8c468;
+  --danger: #e87d7d;
+  --info: #6fb3d9;
+
+  --ok-fg: #3ddca6;
+  --warn-fg: #e8c468;
+  --danger-fg: #e87d7d;
+  --info-fg: #6fb3d9;
+  --ok-dim: #133a30;
+  --warn-dim: #3a3320;
+  --danger-dim: #3d2525;
+  --info-dim: #17303d;
+
+  --ring-offset: var(--bg);
+  --shadow-overlay: 0 16px 48px -12px rgb(0 0 0 / 0.6);
+  --scrim: rgb(0 0 0 / 0.62);
+
+  --chart-grid: #1c3b35;
+  --chart-axis: #9fb8b2;
+
+  --chart-1: #00b079;
+  --chart-2: #4b99d7;
+  --chart-3: #be8800;
+  --chart-4: #a37ecd;
+  --chart-5: #e36654;
+  --chart-6: #00a8a9;
+  --chart-7: #d78bc0;
+  --chart-8: #8fa5b8;
+
+  --chart-seq-1: #123a33;
+  --chart-seq-2: #1a5a4c;
+  --chart-seq-3: #217a66;
+  --chart-seq-4: #2c9d81;
+  --chart-seq-5: #3ddca6;
+
+  --status-serious: #e8a05c;
+}
+
+/* A themed subtree paints its own background/foreground, otherwise a light
+   panel inside a dark page would inherit dark text on its light surface. */
+[data-theme] {
+  background-color: var(--bg);
+  color: var(--fg);
+}
+
+/* ---------------------------------------------------------------------
+   Motion collapse. Global rather than per-component so nothing is missed
+   (DESIGN.md §4, 06 §14.4).
+   --------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    /* Collapsing the tokens themselves covers every component that drives
+       its timing from them — including the live dot's pulse, which becomes
+       a static dot exactly as DESIGN.md §4 requires. */
+    --dur-micro: 0ms;
+    --dur-standard: 0ms;
+    --dur-overlay: 0ms;
+    --pulse-duration: 0ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
