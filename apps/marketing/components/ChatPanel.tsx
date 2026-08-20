@@ -16,7 +16,8 @@ import { useDemoChat } from "../lib/useDemoChat";
  * product in two channels.
  */
 export function ChatPanel({ onClose }: { onClose: () => void }) {
-  const { messages, status, error, start, send, retry } = useDemoChat();
+  const { messages, status, error, activity, start, send, retry } =
+    useDemoChat();
   const [draft, setDraft] = React.useState("");
   const inputRef = React.useRef<HTMLInputElement>(null);
   const logRef = React.useRef<HTMLDivElement>(null);
@@ -167,6 +168,33 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             {m.text}
           </TranscriptRow>
         ))}
+
+        {/*
+          What the desk is doing, while it does it.
+
+          A booking turn is several provider round trips — measured at ~5s — and
+          before this the whole wait was blank: you typed, nothing moved, then a
+          finished reply appeared at once. The backend already emitted a
+          manifest-authored label ("Checking the diary") partway through; the
+          widget discarded it.
+
+          `aria-live="polite"` so a screen-reader user hears the same progress a
+          sighted one sees, and `aria-hidden` on the dots because "· · ·" read
+          aloud is noise.
+        */}
+        {activity ? (
+          <p
+            aria-live="polite"
+            className="flex items-center gap-2 font-sans text-body-sm text-fg-subtle"
+          >
+            <span aria-hidden="true" className="flex gap-1">
+              <span className="size-1.5 animate-pulse rounded-full bg-accent [animation-delay:0ms]" />
+              <span className="size-1.5 animate-pulse rounded-full bg-accent [animation-delay:150ms]" />
+              <span className="size-1.5 animate-pulse rounded-full bg-accent [animation-delay:300ms]" />
+            </span>
+            {activity}…
+          </p>
+        ) : null}
 
         {showEmptyState ? (
           <p className="mt-auto text-body-sm text-fg-subtle">

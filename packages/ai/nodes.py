@@ -138,6 +138,25 @@ class NodeFactory:
 
     # ── The three node kinds ──────────────────────────────────────────────
 
+    @staticmethod
+    def _handoff_notice(spec: GraphSpec, chosen: str) -> str:
+        """What the CALLER is told while the specialist starts work.
+
+        Routing costs a model round trip, and the specialist then costs another
+        before its first token — measured at 3.7s of complete silence on a turn
+        that calls no tool, so not even the "Checking the diary" indicator
+        appears. A visitor watching a blank panel for four seconds assumes it
+        is broken.
+
+        The text comes from the MANIFEST (`agents[].handoff_notice`), never from
+        the agent key: "connecting you to triage" tells a caller the practice
+        has a triage specialist, which is internal structure and none of their
+        business. The fallback is deliberately vague for the same reason.
+        """
+        target = spec.agent(chosen)
+        notice = getattr(target, "handoff_notice", None) if target else None
+        return notice or "One moment"
+
     def supervisor(
         self, agent: AgentSpec, spec: GraphSpec
     ) -> Callable[[ConversationState], Awaitable[dict[str, Any]]]:
@@ -150,6 +169,47 @@ class NodeFactory:
         members = list(agent.members)
 
         async def _traced_run(state: ConversationState) -> dict[str, Any]:
+            # ── Contentless message: answer here, skip routing entirely ──
+            #
+            # ROUTING IS STILL THE PRIORITY. This is the one case where there
+            # is nothing to route: "hi", "thanks", "bye" — no request, no
+            # specialist that could serve it better. Everything else, however
+            # short, falls straight through to `_route` below and is dispatched
+            # exactly as before.
+            #
+            # Placed BEFORE the routing call rather than after it because the
+            # saving IS the call. Deciding who should say hello costs a full
+            # model round trip, and the router was choosing the knowledge-base
+            # specialist — the wrong agent for a greeting, and the one with the
+            # largest prompt in the manifest. Two calls become one.
+            #
+            # Gated on `may_greet` in the MANIFEST: a vertical that wants its
+            # supervisor strictly silent simply does not set it.
+            if agent.may_greet and _is_greeting_turn(state):
+                log.info("graph.supervisor.answered_greeting", agent=agent.key)
+                prompt = self._assembler.assemble(
+                    agent=agent,
+                    history=list(state.get("messages", [])),
+                    channel=str(state.get("channel", "web_chat")),
+                    locale=str(state.get("locale", "en-GB")),
+                    timezone=str(state.get("timezone", "UTC")),
+                    now=datetime.now(tz=UTC),
+                )
+                text, usage, _ = await self._stream_reply(
+                    prompt.messages, agent, succeeded=set(), previously=set()
+                )
+                return {
+                    "messages": [
+                        Message(role="assistant", content=text, name=agent.key)
+                    ],
+                    "next_agent": None,
+                    "current_agent": agent.key,
+                    "agent_history": [agent.key],
+                    "step_count": 1,
+                    "finish_reason": "stop",
+                    **_usage_delta(usage),
+                }
+
             chosen = await self._route(agent, members, state)
 
             # ── Structural anti-stick ─────────────────────────────────────
@@ -234,6 +294,12 @@ class NodeFactory:
                         "from_agent": agent.key,
                         "to_agent": chosen,
                         "reason": "supervisor_routing",
+                        # A caller-safe phrase for the widget, which never sees
+                        # `to_agent` — a visitor should not be told the practice
+                        # runs a triage specialist. Manifest-authored, so a
+                        # vertical writes its own; falls back to a neutral line
+                        # rather than inventing one here.
+                        "notice": self._handoff_notice(spec, chosen),
                     },
                 )
             return {
@@ -299,6 +365,10 @@ class NodeFactory:
             #: that something was moved or cancelled is only true if the write
             #: that would have moved or cancelled it succeeded.
             succeeded: set[str] = set()
+            #: Set by the fast path below: prose the model has already produced
+            #: and that no tool ran after, so it can be streamed as-is instead
+            #: of paying a second round trip to regenerate it.
+            reply_text: str | None = None
             confirmed: frozenset[str] = frozenset(
                 collected.get("_confirmed_tools") or ()
             )
@@ -392,10 +462,38 @@ class NodeFactory:
                         )
                         continue
 
-                    # Genuinely finished. The text is thrown away and the
-                    # streamed pass below regenerates it — one extra call, in
-                    # exchange for the caller seeing tokens arrive rather than a
-                    # block appearing after a pause.
+                    # Genuinely finished.
+                    #
+                    # ── The fast path ────────────────────────────────────
+                    #
+                    # If NO tool ran this turn, the text in hand is already the
+                    # answer: nothing happened after it was written that could
+                    # change it. Regenerating it costs a second full round trip
+                    # to the provider for a reply we are holding.
+                    #
+                    # Measured on "hi": 1.56s to decide no tool was needed, then
+                    # 0.95s to say "Hello! How can I help you today?" — 2.7s of
+                    # silence for six words, and the second call produced
+                    # essentially what the first already had.
+                    #
+                    # Only when `tool_calls_made == 0`. Once a tool HAS run, the
+                    # prose from the deciding round predates the tool result and
+                    # replaying it would speak from stale information — the
+                    # class of bug that tells a caller their appointment moved
+                    # when the tool that would have moved it had not yet
+                    # returned. On that path the regenerating call stays.
+                    if (
+                        tool_calls_made == 0
+                        and not nudged
+                        and result.message.content
+                    ):
+                        # `not nudged` matters: once the model has been nudged
+                        # for narrating without acting, the prose in hand is the
+                        # narration itself — "I'll move it. One moment." —
+                        # and replaying it would put a promise on the caller's
+                        # screen that the guard never gets to check. The final
+                        # pass regenerates, and the guard sees the claim.
+                        reply_text = result.message.content
                     break
 
                 history.append(result.message)
@@ -450,6 +548,9 @@ class NodeFactory:
                 succeeded=succeeded,
                 previously=set(collected.get("_completed_tools") or ()) - succeeded,
                 failure=failure_message,
+                # Present only when no tool ran: stream the prose already in
+                # hand instead of paying a second round trip for it.
+                replay=reply_text,
             )
             usage_total = _sum_usage(usage_total, usage)
 
@@ -640,8 +741,17 @@ class NodeFactory:
         succeeded: set[str] | None = None,
         previously: set[str] | None = None,
         failure: str | None = None,
+        replay: str | None = None,
     ) -> tuple[str, Any, str]:
         """Stream one completion, emitting deltas as they land.
+
+        ``replay`` short-circuits the provider entirely: the text is already in
+        hand from the tool-deciding round and no tool ran after it, so a second
+        round trip would regenerate what we are holding. It is still emitted
+        through the SAME guard and the same sink, so every protection —
+        unverified claims, slot handles, one ask per reply — applies identically.
+        The saving is a full provider round trip, which on a simple greeting is
+        half the total wait.
 
         Returns the assembled text so the node can put it in state. The sink
         gets tokens *as they arrive*; the return value is for the durable
@@ -664,6 +774,22 @@ class NodeFactory:
         guard = _UnverifiedClaimGuard(
             succeeded or set(), previously or set(), failure
         )
+
+        if replay is not None:
+            # Chunked rather than emitted whole: the sink's contract is a
+            # stream of deltas, and a browser rendering one 200-character token
+            # jumps the text into place instead of typing it. The guard buffers
+            # by sentence either way, so this changes nothing it can see.
+            for i in range(0, len(replay), _REPLAY_CHUNK_CHARS):
+                piece = guard.feed(replay[i : i + _REPLAY_CHUNK_CHARS])
+                if piece:
+                    chunks.append(piece)
+                    await emit("token", {"text": piece})
+            if tail := guard.flush():
+                chunks.append(tail)
+                await emit("token", {"text": tail})
+            log.info("graph.reply.replayed", agent=agent.key, chars=len(replay))
+            return "".join(chunks), None, "stop"
 
         # The streamed reply. Its span is separate from the tool-round `chat`
         # spans above so a waterfall shows the two provider round-trips as two
@@ -998,6 +1124,14 @@ _HANDOFF_ANNOUNCEMENT: Final = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def _last_user_text(state: ConversationState) -> str:
+    """The most recent thing the caller said, or "" if they have said nothing."""
+    for message in reversed(list(state.get("messages", []))):
+        if message.role == "user" and message.content:
+            return message.content
+    return ""
 
 
 def _last_speaker(state: ConversationState, members: list[str]) -> str | None:
@@ -1354,6 +1488,72 @@ _NEGATED_CLAIM: Final = re.compile(
 )
 
 
+#: A message carrying no request: a greeting, thanks, or a goodbye.
+#:
+#: Deliberately a WHITELIST of whole utterances, not a keyword search. "hi" is
+#: contentless; "hi, I chipped a tooth" is not, and a pattern that matched the
+#: first word of the second would hand a dental emergency to a node that cannot
+#: book. The bound on length is the second guard: anything with real content is
+#: longer than this.
+_CONTENTLESS: Final = re.compile(
+    r"^(?:"
+    r"(?:hi|hey|hello|yo|hiya|namaste|good\s+(?:morning|afternoon|evening|day))"
+    r"|(?:thanks?|thank\s+you|cheers|ta|much\s+appreciated)"
+    r"|(?:bye|goodbye|see\s+you|that'?s\s+all|nothing\s+else|all\s+good)"
+    r")[\s!.,]*$",
+    re.IGNORECASE,
+)
+
+#: Longest utterance the greeting path will consider, in characters. A belt to
+#: the whitelist's braces: even if a pattern above ever grows too permissive, a
+#: real request does not fit in this.
+_CONTENTLESS_MAX_CHARS: Final = 24
+
+
+def _is_contentless(text: str) -> bool:
+    """Does this message ask for nothing at all?
+
+    Used ONLY to let a supervisor answer without dispatching. Routing is tried
+    first and wins whenever the message carries a request; this is the fallback
+    for the case where there is genuinely nothing to route.
+    """
+    stripped = (text or "").strip()
+    if not stripped or len(stripped) > _CONTENTLESS_MAX_CHARS:
+        return False
+    return bool(_CONTENTLESS.match(stripped))
+
+
+def _is_greeting_turn(state: ConversationState) -> bool:
+    """Contentless AND with nothing pending — safe for the supervisor to answer.
+
+    The second half is what the whitelist alone cannot see. "okay" opening a
+    conversation is contentless; "okay" after "let me hand you over now" is the
+    caller ACCEPTING something, and answering it here would strand them — the
+    handoff they just agreed to never happens.
+
+    So: only when the caller has spoken first, or when the last thing the desk
+    said was itself a greeting. Anything following a real assistant turn goes
+    to the router, which has the context to know what "okay" means.
+    """
+    messages = list(state.get("messages", []))
+    if not _is_contentless(_last_user_text(state)):
+        return False
+    for message in reversed(messages[:-1] if messages else []):
+        if message.role == "assistant" and message.content:
+            # A prior desk turn exists: this is a reply to something, not an
+            # opening. Let the router decide.
+            return False
+        if message.role == "user":
+            break
+    return True
+
+
+#: Characters per emitted delta when replaying held text. ~24 keeps the
+#: perceived typing rhythm close to a real stream; the guard buffers by
+#: sentence regardless, so this affects only how it looks.
+_REPLAY_CHUNK_CHARS: Final = 24
+
+
 #: A sentence that asks the caller for something.
 #:
 #: Deliberately narrow: a question mark, or an imperative request of the kind a
@@ -1601,6 +1801,12 @@ class _UnverifiedClaimGuard:
         if self._tainted:
             # Leading space: an already-emitted sentence ends without one, and
             # "now.I'm sorry" is a visible seam in the caller's chat window.
+            #
+            # NOT subject to the one-question rule. The replacement ends "Shall
+            # I try again?", so a reply that had already asked something would
+            # have this suppressed as a second question — and the caller would
+            # get silence where an honest correction belongs. The guard's own
+            # output is never the thing to trim.
             return " " + self._replacement()
         remaining, self._buffer = self._buffer, ""
         if not remaining:

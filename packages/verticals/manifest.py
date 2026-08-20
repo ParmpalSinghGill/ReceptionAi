@@ -110,6 +110,29 @@ class AgentSpec(BaseModel):
 
     #: SUPERVISOR only: the ordered specialists it may dispatch to.
     members: list[str] = Field(default_factory=list)
+    #: What the CALLER is told while this agent starts work, after a handoff.
+    #:
+    #: Written per agent because the honest phrase differs: checking a diary is
+    #: not the same as putting someone through to a person. Never mentions the
+    #: agent's key or role — a visitor should not learn the practice runs a
+    #: triage specialist. Empty means the platform's neutral fallback.
+    handoff_notice: str = ""
+    #: SUPERVISOR only: may it answer a contentless message itself?
+    #:
+    #: A supervisor normally routes and never speaks — the specialist answers,
+    #: so one user turn produces one assistant message. That is right for
+    #: anything carrying a request, and wasteful for "hi": routing it costs a
+    #: full model round trip before the agent that will actually reply even
+    #: starts, and a bare greeting was being handed to the knowledge-base
+    #: specialist, which is the wrong agent for it.
+    #:
+    #: Scope is deliberately tiny and belongs to the manifest, not the engine:
+    #: greetings, thanks, farewells — utterances with no informational content.
+    #: A supervisor that answers questions would quote prices and guess at
+    #: availability, which is the exact failure the routing split prevents.
+    #: ROUTING REMAINS THE PRIORITY: this is checked only after the router has
+    #: had its say, and only when the message asks for nothing.
+    may_greet: bool = False
     #: TERMINAL only: the Outcome written to the Conversation (contract §7).
     outcome: Literal["resolved", "booked", "transferred", "abandoned"] | None = None
 

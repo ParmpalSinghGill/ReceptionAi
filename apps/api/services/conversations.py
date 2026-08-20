@@ -176,7 +176,7 @@ class ConversationService:
         """
         async with self._sessions.unit_of_work(ctx, readonly=True) as session:
             history = await self._load_history(
-                session, conversation_id, exclude_turn_id=turn_id
+                session, conversation_id, drop_trailing_user=user_text
             )
             manifest = await ManifestInstallService(session).load()
             collected = await self._load_collected_data(session, conversation_id)
@@ -327,7 +327,12 @@ class ConversationService:
 
         from apps.api.settings import get_settings
 
-        return resolve_policy(row, ceiling=get_settings().langfuse_capture)
+        settings = get_settings()
+        return resolve_policy(
+            row,
+            ceiling=settings.langfuse_capture,
+            max_chars=settings.langfuse_max_chars,
+        )
 
     @staticmethod
     async def _business_timezone(session) -> str:
@@ -440,7 +445,7 @@ class ConversationService:
             return conversation, turns
 
     async def _load_history(
-        self, session, conversation_id: UUID, *, exclude_turn_id: UUID | None = None
+        self, session, conversation_id: UUID, *, drop_trailing_user: str | None = None
     ) -> list[Message]:
         """Prior turns as port messages, oldest first.
 
@@ -449,7 +454,7 @@ class ConversationService:
         rebuilds itself; feeding them back would present the model with tool
         output it never asked for in this turn.
 
-        ``exclude_turn_id`` drops the turn being processed right now. The
+        ``drop_trailing_user`` drops the turn being processed right now. The
         message is persisted by ``record_user_turn`` before the stream opens,
         so by the time this runs it is already a row — and ``new_state`` appends
         it AGAIN as ``user_message``. The result was every caller line appearing
@@ -461,14 +466,29 @@ class ConversationService:
         Harmless-looking, and not: it doubles the apparent emphasis of the most
         recent line, wastes context, and makes a repeated question look like an
         impatient caller repeating themselves.
+
+        **Matched on content and position, not on id.** The obvious fix — pass
+        the turn id and skip that row — silently does nothing, because
+        ``record_user_turn`` returns a freshly minted *assistant* turn id rather
+        than the id of the user row it just wrote. The two never compare equal,
+        the filter never fires, and the duplicate survives a fix that reads
+        correctly. Only the LAST message is considered, and only when it is a
+        user turn whose text matches, so an earlier identical message ("yes"
+        said twice, three turns apart) is untouched.
         """
         turns = await TurnRepository(session).replay(
             conversation_id, limit=_HISTORY_LIMIT
         )
+        if (
+            drop_trailing_user is not None
+            and turns
+            and turns[-1].role == TurnRole.USER
+            and (turns[-1].content or "").strip() == drop_trailing_user.strip()
+        ):
+            turns = turns[:-1]
+
         messages: list[Message] = []
         for turn in turns:
-            if exclude_turn_id is not None and turn.id == exclude_turn_id:
-                continue
             if turn.role == TurnRole.USER and turn.content:
                 messages.append(Message(role="user", content=turn.content))
             elif turn.role == TurnRole.ASSISTANT and turn.content:

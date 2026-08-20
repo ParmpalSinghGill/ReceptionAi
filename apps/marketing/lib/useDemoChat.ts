@@ -76,6 +76,9 @@ export function useDemoChat() {
   const [status, setStatus] = React.useState<ChatStatus>("idle");
   const [error, setError] = React.useState<ChatError | null>(null);
   const [greeting, setGreeting] = React.useState<string | null>(null);
+  //: What the desk is doing right now — "Checking the diary" — or null when
+  //: it is thinking or speaking. Drives the line under the transcript.
+  const [activity, setActivity] = React.useState<string | null>(null);
 
   const sourceRef = React.useRef<EventSource | null>(null);
   // True from the moment a session POST is issued until it settles, so two
@@ -246,9 +249,32 @@ export function useDemoChat() {
       void flushPending();
     });
 
+    // What the desk is DOING, while it does it.
+    //
+    // A booking turn is ~5s of provider round trips, and before this the whole
+    // wait was blank: the caller typed, nothing moved, then a finished reply
+    // appeared at once. The backend already emitted a manifest-authored label
+    // ("Checking the diary", "Booking your appointment") at ~2.9s and the
+    // widget simply discarded it.
+    //
+    // Cleared on the first token, because by then the reply itself is the
+    // status and leaving both on screen reads as two things happening.
+    es.addEventListener("tool_call", (ev) => {
+      const data = JSON.parse((ev as MessageEvent<string>).data) as {
+        status?: string;
+        label?: string | null;
+      };
+      if (data.status === "running" && data.label) {
+        setActivity(data.label);
+      } else {
+        setActivity(null);
+      }
+    });
+
     es.addEventListener("token", (ev) => {
       const data = JSON.parse((ev as MessageEvent<string>).data) as TokenEvent;
       activeTurnRef.current = data.turn_id;
+      setActivity(null);
       setStatus("streaming");
       appendDelta(data.turn_id, data.delta);
     });
@@ -421,6 +447,13 @@ export function useDemoChat() {
         { id: uuid(), role: "caller", text: content },
       ]);
       setStatus("sending");
+      // Something on screen IMMEDIATELY. The first provider round trip takes
+      // ~1-3s before any tool is chosen, and until now that whole window was
+      // blank — the caller typed and nothing moved. A real tool label replaces
+      // this the moment one arrives ("Checking the diary"), and the first token
+      // clears it. Generic on purpose: claiming a specific action before the
+      // model has chosen one would be inventing progress.
+      setActivity("One moment");
       setError(null);
 
       // Without a session there is no credential that can authenticate the
@@ -456,5 +489,5 @@ export function useDemoChat() {
     await start();
   }, [start, teardown]);
 
-  return { messages, status, error, greeting, start, send, retry };
+  return { messages, status, error, greeting, activity, start, send, retry };
 }

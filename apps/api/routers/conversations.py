@@ -539,6 +539,22 @@ def _frame(
             return SSEEvent(
                 event="handoff", data={"turn_id": str(turn_id), **event.data}
             )
+        case "handoff":
+            # The widget gets the caller-safe half only: a phrase to show while
+            # the specialist starts, never `to_agent`. Rendered as a `tool_call`
+            # so it reuses the activity line the widget already has, rather than
+            # adding a second progress mechanism that could disagree with it.
+            if notice := event.data.get("notice"):
+                return SSEEvent(
+                    event="tool_call",
+                    data={
+                        "turn_id": str(turn_id),
+                        "tool": "handoff",
+                        "label": notice,
+                        "status": "running",
+                    },
+                )
+            return None
         case "turn.started" if not is_widget:
             return SSEEvent(
                 event="turn.started", data={"turn_id": str(turn_id), **event.data}
