@@ -98,7 +98,14 @@ class TracingPolicy:
     #: Character ceiling on any recorded content, applied even under
     #: ``Capture.FULL``. A 200KB knowledge-base dump in a trace is a storage
     #: problem, not an observability win.
-    max_chars: int = 4_000
+    #:
+    #: 16k rather than 4k because 4k cut the thing people open a trace to read.
+    #: This platform's system prompt is assembled from eight layers and runs to
+    #: ~10.7k characters for the scheduler, so the old ceiling truncated it
+    #: mid-sentence and hid exactly the part someone debugging a prompt needs —
+    #: the role instructions, which sit at the END, after the platform and
+    #: safety frames. Overridable per deployment via LANGFUSE_MAX_CHARS.
+    max_chars: int = 16_000
 
 
 @dataclass(frozen=True, slots=True)

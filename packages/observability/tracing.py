@@ -81,7 +81,10 @@ CAPTURE_KEY: Final = "tracing.capture"
 
 
 def resolve_policy(
-    tenant_value: str | None, *, ceiling: str = "masked"
+    tenant_value: str | None,
+    *,
+    ceiling: str = "masked",
+    max_chars: int | None = None,
 ) -> TracingPolicy:
     """Combine a tenant's opt-in with the deployment's ceiling.
 
@@ -104,7 +107,10 @@ def resolve_policy(
 
     tenant = parse(tenant_value) if tenant_value is not None else Capture.MASKED
     limit = parse(ceiling)
-    return TracingPolicy(capture=min(tenant, limit, key=lambda c: order[c]))
+    capture = min(tenant, limit, key=lambda c: order[c])
+    if max_chars is None:
+        return TracingPolicy(capture=capture)
+    return TracingPolicy(capture=capture, max_chars=max_chars)
 
 
 @contextlib.contextmanager

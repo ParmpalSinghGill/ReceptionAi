@@ -145,6 +145,11 @@ class Settings(BaseSettings):
     #: never above it. Set to "full" only on a stack whose traces nobody
     #: outside the clinical relationship can read.
     langfuse_capture: Literal["none", "masked", "full"] = "masked"
+    #: Character ceiling on recorded prompt/completion text. The default carries
+    #: this platform's whole assembled system prompt (~10.7k for the scheduler);
+    #: lower it if trace storage becomes a concern, raise it if a vertical ships
+    #: a larger knowledge layer.
+    langfuse_max_chars: int = 16_000
 
     @property
     def cors_origins(self) -> list[str]:
