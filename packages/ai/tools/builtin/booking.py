@@ -877,6 +877,41 @@ async def _check_availability(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
         )
 
     if not slots:
+        # A service whose horizon ends before the window opens can NEVER answer
+        # this question: `find_slots` clamps `latest` to now + horizon, so the
+        # search range is empty and the result is [] no matter how free the
+        # diary is. "Suggest a different day" is then the one piece of advice
+        # that cannot work — every later day is further outside the horizon.
+        #
+        # This is reachable from ordinary phrasing, not a corner case: a caller
+        # who mentions pain is put on `emergency` (same-day, horizon 1), and if
+        # they then ask for next week the diary is wide open and the answer is
+        # still "nothing available". Told the real reason, the model re-runs on
+        # a routine code; told "try another day", it loops.
+        horizon_days = getattr(service, "booking_horizon_days", None)
+        horizon_end = (
+            datetime.now(tz=UTC) + timedelta(days=horizon_days)
+            if horizon_days is not None
+            else None
+        )
+        if horizon_end is not None and window_start >= horizon_end:
+            return ToolResult(
+                content=(
+                    f"{service.name} can only be booked "
+                    f"{horizon_days} day{'' if horizon_days == 1 else 's'} "
+                    f"ahead, so it cannot reach "
+                    f"{_speak_time(window_start, tz)} — this is the service's "
+                    f"limit, not a full diary. For a later date, call this "
+                    f"again with a routine service code. Do not tell the "
+                    f"caller that nothing is available."
+                ),
+                structured={
+                    "service": service.code,
+                    "slots": [],
+                    "reason": "outside_booking_horizon",
+                    "horizon_days": horizon_days,
+                },
+            )
         return ToolResult(
             content=(
                 f"Nothing is free for {service.name} between "
