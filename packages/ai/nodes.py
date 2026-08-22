@@ -317,6 +317,13 @@ class NodeFactory:
                 result = await _traced_run(state)
                 if (nxt := result.get("next_agent")) is not None:
                     span.set_attribute("ai.route.next_agent", str(nxt))
+                # A routing supervisor produces no text, and `_node_reply_text`
+                # returns "" for it — the input is still worth recording, since
+                # "what was this routed on?" is the question a reader opens a
+                # supervisor span to answer.
+                span.set_content(
+                    input=_last_user_text(state), output=_node_reply_text(result)
+                )
                 return result
 
         return run
@@ -631,6 +638,16 @@ class NodeFactory:
                     span.set_attribute("ai.node.finish_reason", str(reason))
                 span.set_attribute(
                     "ai.node.tool_calls", int(result.get("tool_call_count", 0) or 0)
+                )
+                # What this node was asked and what it answered. Without it the
+                # span carried only counters, so a reader opening
+                # `ai.node.scheduler` to see what the scheduler actually said
+                # found an empty input/output and had to infer it from the
+                # sibling `llm.chat` generation. Raw content: `set_content` is
+                # policy-gated at the adapter, which is the whole point of
+                # passing it unconditionally from here.
+                span.set_content(
+                    input=_last_user_text(state), output=_node_reply_text(result)
                 )
                 return result
 
@@ -1187,6 +1204,22 @@ _HANDOFF_ANNOUNCEMENT: Final = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def _node_reply_text(result: dict[str, Any]) -> str:
+    """The assistant text a node produced, for its trace span.
+
+    A node returns a state *delta*, not a reply — recording the whole dict on
+    the span would put `collected_data`, `step_count` and the rest where a
+    reader expects a sentence. Only the assistant messages are content; a
+    supervisor that merely routes returns none, and "" is the honest answer.
+    """
+    parts = [
+        message.content
+        for message in result.get("messages", []) or []
+        if getattr(message, "role", None) == "assistant" and message.content
+    ]
+    return "\n".join(parts)
 
 
 def _last_user_text(state: ConversationState) -> str:
