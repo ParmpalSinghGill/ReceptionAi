@@ -38,7 +38,9 @@ from packages.voice.phone import (
     wants_phone_number,
 )
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     Frame,
+    InterruptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -58,6 +60,22 @@ _DUPLICATE_WINDOW_S = 2.0
 #: Spoken when the graph fails outright. The caller gets a sentence rather than
 #: silence; the detail goes to the log, never to the speaker.
 _FALLBACK_REPLY = "Sorry, I had trouble with that. Could you say it again?"
+
+#: Silence between the preamble finishing and the reply starting. VOICE ONLY.
+#:
+#: Two utterances butted end to end read as one run-on sentence — "let me check
+#: the diary Thursday at ten is free" — because TTS gives no sentence-final
+#: pause between separate frames. Half a second is the beat a person leaves
+#: after saying "one moment", short enough that nobody thinks the line dropped.
+_PREAMBLE_GAP_S = 0.5
+
+#: Ceiling on waiting for the preamble's audio to finish.
+#:
+#: The wait ends on BotStoppedSpeakingFrame, which the output transport emits.
+#: If that frame never arrives — TTS error, transport hiccup — the turn must
+#: still complete, so the wait is bounded and simply proceeds on timeout. Sized
+#: for a long preamble read slowly, not for a typical one.
+_PREAMBLE_MAX_WAIT_S = 12.0
 
 
 def merge_utterances(left: str, right: str) -> str:
@@ -164,6 +182,9 @@ class VoiceAgentProcessor(FrameProcessor):
         self._last_user_text = ""
         self._last_user_at = 0.0
         self._pending_user_text = ""
+        # Set while a preamble is being spoken; the reply waits on it so the two
+        # utterances do not overlap. None when no preamble is in flight.
+        self._speaking: asyncio.Event | None = None
         # Digits held back while the caller is still reciting a number.
         self._phone_buffer = ""
         self._phone_flush_task: asyncio.Task[None] | None = None
@@ -208,12 +229,51 @@ class VoiceAgentProcessor(FrameProcessor):
         "Let me check what we have today" said at ~1.5s is the difference
         between a caller who waits and one who says "hello? are you there?"
         into the silence — which then arrives as a second turn.
+
+        Arms the speech gate before pushing, so the reply that follows waits for
+        this audio to finish instead of landing on top of it. See
+        :meth:`_await_preamble_spoken`.
         """
         text = (text or "").strip()
         if not text:
             return
         log.info("voice.turn.preamble", chars=len(text))
+        self._speaking = asyncio.Event()
         await self._push_spoken_reply(text, direction)
+
+    async def _await_preamble_spoken(self) -> None:
+        """Block until the preamble's audio has finished, then leave a beat.
+
+        VOICE ONLY — the chat path never calls this. On a call the preamble and
+        the reply share one audio channel, so they are sequential whether or not
+        the code says so; without this wait they were queued back to back and
+        the caller heard one run-on sentence, with the browser transcript
+        printing the reply while the preamble was still being read.
+
+        ``push_frame`` queues, it does not speak: it returns as soon as the
+        frame is handed downstream, long before TTS has produced audio. The only
+        honest end-of-speech signal is ``BotStoppedSpeakingFrame`` from the
+        output transport, which :meth:`process_frame` routes here.
+
+        Bounded by ``_PREAMBLE_MAX_WAIT_S``: a dropped stop frame must not strand
+        the turn, so a timeout proceeds rather than raising. An interruption
+        clears the gate too — if the caller talks over the preamble, waiting out
+        the rest of it would delay the answer they interrupted for.
+        """
+        gate = self._speaking
+        if gate is None:
+            return
+        try:
+            await asyncio.wait_for(gate.wait(), timeout=_PREAMBLE_MAX_WAIT_S)
+        except TimeoutError:
+            log.warning("voice.turn.preamble_wait_timeout")
+        finally:
+            # Cleared only once the wait is over. Clearing it up front opens a
+            # race: a graph that returns faster than the audio plays would null
+            # the gate before the stop frame arrives, `process_frame` would find
+            # nothing to set, and the caller would sit through the full timeout.
+            self._speaking = None
+        await asyncio.sleep(_PREAMBLE_GAP_S)
 
     async def _run_one_turn(self, user_text: str, direction: FrameDirection) -> str:
         self._last_user_text = user_text
@@ -231,6 +291,9 @@ class VoiceAgentProcessor(FrameProcessor):
         if not reply:
             reply = _FALLBACK_REPLY
         log.info("voice.turn.replied", reply_len=len(reply))
+        # Nothing to wait for unless a preamble was actually spoken this turn.
+        # When one was, the reply holds until its audio ends plus a beat.
+        await self._await_preamble_spoken()
         return reply
 
     def _take_follow_up(self, current_text: str) -> str:
@@ -368,6 +431,16 @@ class VoiceAgentProcessor(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
+
+        # End of the preamble's audio, travelling UPSTREAM from the output
+        # transport (this processor sits above TTS). Releases the reply waiting
+        # in `_await_preamble_spoken`. An interruption releases it too: the
+        # caller who talks over the preamble wants the answer sooner, not after
+        # the rest of a sentence they already cut off.
+        if isinstance(frame, BotStoppedSpeakingFrame | InterruptionFrame):
+            gate = self._speaking
+            if gate is not None:
+                gate.set()
 
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)

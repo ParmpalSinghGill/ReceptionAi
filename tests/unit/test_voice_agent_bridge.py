@@ -8,12 +8,15 @@ de-duplication rules, which is where a caller's words actually get lost.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 pytest.importorskip(
     "pipecat", reason="voice extra not installed (pip install -e '.[voice]')"
 )
 
+from packages.providers.voice import agent_bridge
 from packages.providers.voice.agent_bridge import (
     VoiceAgentProcessor,
     last_user_text,
@@ -108,6 +111,7 @@ def _bridge(replies: list[str], *, queue_during: dict[str, str] | None = None):
     proc._last_user_text = ""
     proc._last_user_at = 0.0
     proc._pending_user_text = ""
+    proc._speaking = None
     proc._phone_buffer = ""
     proc._phone_flush_task = None
 
@@ -197,3 +201,82 @@ class TestDrainTurns:
         await proc._drain_turns("a question", FrameDirection.DOWNSTREAM)
         assert proc._busy is False
         assert proc._state["busy"] is False
+
+
+class TestPreambleGate:
+    """The reply waits for the preamble's audio, then a beat. VOICE ONLY.
+
+    On a call the two utterances share one audio channel: pushed back to back
+    they arrive as one run-on sentence ("let me check the diary Thursday at ten
+    is free"), and the browser transcript printed the reply while the preamble
+    was still being read. `push_frame` returns when the frame is queued, not
+    when it has been spoken, so the end of speech has to come from the output
+    transport's BotStoppedSpeakingFrame.
+    """
+
+    async def test_reply_waits_for_the_stop_frame(self) -> None:
+        proc, _ = _bridge(["the answer"])
+        proc._speaking = asyncio.Event()
+
+        released = False
+
+        async def release() -> None:
+            """Stands in for the stop frame reaching `process_frame` mid-wait."""
+            nonlocal released
+            await asyncio.sleep(0.05)
+            released = True
+            assert proc._speaking is not None, (
+                "gate was cleared before the stop frame arrived — a late frame "
+                "would find nothing to set and the turn would eat the timeout"
+            )
+            proc._speaking.set()
+
+        task = asyncio.create_task(release())
+        await proc._await_preamble_spoken()
+        assert released, "reply was released before the preamble finished"
+        await task
+
+    async def test_gap_follows_the_stop_frame(self) -> None:
+        """The 0.5s beat is measured AFTER speech ends, not from the push."""
+        proc, _ = _bridge(["the answer"])
+        proc._speaking = asyncio.Event()
+        proc._speaking.set()  # audio already finished
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await proc._await_preamble_spoken()
+        assert loop.time() - started >= 0.5
+
+    async def test_no_preamble_means_no_wait(self) -> None:
+        """A turn with no tool round must not pay the gap."""
+        proc, _ = _bridge(["the answer"])
+        proc._speaking = None
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await proc._await_preamble_spoken()
+        assert loop.time() - started < 0.1
+
+    async def test_a_dropped_stop_frame_does_not_strand_the_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No BotStoppedSpeakingFrame ever arrives — the reply still goes out."""
+        monkeypatch.setattr(agent_bridge, "_PREAMBLE_MAX_WAIT_S", 0.05)
+        monkeypatch.setattr(agent_bridge, "_PREAMBLE_GAP_S", 0.0)
+        proc, _ = _bridge(["the answer"])
+        proc._speaking = asyncio.Event()  # never set
+
+        await proc._await_preamble_spoken()  # must return, not hang
+
+    async def test_gate_is_consumed_once(self) -> None:
+        """A second call is a no-op: one preamble, one wait."""
+        proc, _ = _bridge(["the answer"])
+        proc._speaking = asyncio.Event()
+        proc._speaking.set()
+        await proc._await_preamble_spoken()
+        assert proc._speaking is None
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await proc._await_preamble_spoken()
+        assert loop.time() - started < 0.1
