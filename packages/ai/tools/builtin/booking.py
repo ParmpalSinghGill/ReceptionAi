@@ -888,22 +888,28 @@ async def _check_availability(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
         # they then ask for next week the diary is wide open and the answer is
         # still "nothing available". Told the real reason, the model re-runs on
         # a routine code; told "try another day", it loops.
+        # The test is whether the horizon TRUNCATES the window, not whether the
+        # window starts beyond it. The model asks for a range — "from now, the
+        # next seven days" is what an unqualified "anything next week?" becomes
+        # — so `window_start` is almost always today and inside any horizon. It
+        # is `window_end` that falls outside, and the search silently covers a
+        # fraction of what was asked for.
         horizon_days = getattr(service, "booking_horizon_days", None)
         horizon_end = (
             datetime.now(tz=UTC) + timedelta(days=horizon_days)
             if horizon_days is not None
             else None
         )
-        if horizon_end is not None and window_start >= horizon_end:
+        if horizon_end is not None and window_end > horizon_end:
             return ToolResult(
                 content=(
-                    f"{service.name} can only be booked "
-                    f"{horizon_days} day{'' if horizon_days == 1 else 's'} "
-                    f"ahead, so it cannot reach "
-                    f"{_speak_time(window_start, tz)} — this is the service's "
-                    f"limit, not a full diary. For a later date, call this "
-                    f"again with a routine service code. Do not tell the "
-                    f"caller that nothing is available."
+                    f"{service.name} can only be booked {horizon_days} "
+                    f"day{'' if horizon_days == 1 else 's'} ahead, so nothing "
+                    f"was searched beyond {_speak_time(horizon_end, tz)} — "
+                    f"this is the service's own limit, NOT a full diary. The "
+                    f"diary past that point may be wide open. For a later "
+                    f"date, call this again with a routine service code. Do "
+                    f"not tell the caller that nothing is available."
                 ),
                 structured={
                     "service": service.code,
