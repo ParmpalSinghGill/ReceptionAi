@@ -87,19 +87,30 @@ class _StubRepo:
 def offering(monkeypatch: pytest.MonkeyPatch):
     """A practice with several free slots, wired into the booking tools."""
     from contextlib import asynccontextmanager
-    from dataclasses import dataclass
     from datetime import UTC, datetime, timedelta
     from decimal import Decimal
 
-    from packages.booking.domain import AllocationCandidate, ResourceSpec, Slot
+    from packages.booking.domain import (
+        AllocationCandidate,
+        ResourceSpec,
+        ServiceSpec,
+        Slot,
+    )
 
-    @dataclass(frozen=True)
-    class _Service:
-        id: Any = "svc"
-        code: str = "emergency"
-        name: str = "Emergency Appointment"
-        price: Decimal | None = Decimal("75.0000")
-        currency: str | None = "GBP"
+    # The real engine type, not a look-alike. `find_slots` returns a
+    # `ServiceSpec`, and a stub with the same attribute names but a different
+    # class is how a serialisation bug reaches production green: the shared
+    # store round-trips real engine dataclasses, so the double has to be one.
+    def _service() -> ServiceSpec:
+        return ServiceSpec(
+            id=uuid7(),
+            tenant_id=uuid7(),
+            code="emergency",
+            name="Emergency Appointment",
+            duration_minutes=20,
+            price=Decimal("75.0000"),
+            currency="GBP",
+        )
 
     base = datetime(2026, 8, 10, 13, 0, tzinfo=UTC)
     people = [
@@ -133,7 +144,7 @@ def offering(monkeypatch: pytest.MonkeyPatch):
         for n in range(6)
     ]
 
-    service = _StubService(slots, _Service(), resources)
+    service = _StubService(slots, _service(), resources)
 
     @asynccontextmanager
     async def unit_of_work(_tenant_id: Any):
@@ -189,7 +200,7 @@ async def test_the_offered_handle_is_the_earliest_slot(offering) -> None:
     )
 
     handle = result.collected_data["offered_slot_ref"]
-    resolved = booking_tools._decode_slot_ref(handle)
+    resolved = await booking_tools._decode_slot_ref(handle, ctx.tenant_id)
     assert resolved is not None
     assert resolved.start_at == offering[0].start_at
 
@@ -211,9 +222,9 @@ async def test_declining_offers_a_different_time(offering) -> None:
     second_handle = second.collected_data["offered_slot_ref"]
 
     assert second_handle != first_handle
-    assert booking_tools._decode_slot_ref(
-        second_handle
-    ).start_at > booking_tools._decode_slot_ref(first_handle).start_at, (
+    second_slot = await booking_tools._decode_slot_ref(second_handle, ctx.tenant_id)
+    first_slot = await booking_tools._decode_slot_ref(first_handle, ctx.tenant_id)
+    assert second_slot.start_at > first_slot.start_at, (
         "Declining must move forward through the queue, not re-offer the same "
         "slot or jump backwards."
     )
@@ -374,3 +385,130 @@ async def test_a_fresh_search_replaces_the_queue(offering) -> None:
         "A fresh check_availability must replace the queue. Leaving the old "
         "index in place walks the customer through the day they just rejected."
     )
+
+
+# ── The cross-replica property ───────────────────────────────────────────────
+#
+# The handles and the alternative queue used to be module-level dicts, which
+# made them per-process: `check_availability` on one pod minted a handle that
+# `book_appointment` on another could not resolve. The tools failed closed and
+# the agent re-checked availability, so the symptom was not a wrong booking but
+# an extra round-trip on a random subset of calls — intermittent, invisible in
+# a transcript, and easy to read as a model problem.
+#
+# A second process is simulated here by clearing the in-process maps between the
+# mint and the redeem while leaving the shared store intact. That is exactly
+# what a second replica sees: someone else's memory is empty, the store is not.
+
+
+class _SharedStore:
+    """An in-memory ConversationStatePort standing in for Redis.
+
+    Deliberately not a mock: these tests assert that a value written by one
+    process is *readable* by another, and a mock that records calls would assert
+    that a method was called instead.
+    """
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.data.get(key)
+
+    async def set(self, key: str, value: str, *, ttl_seconds: int) -> None:
+        self.data[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+
+@pytest.fixture
+def shared(offering, monkeypatch):
+    """The booking tools wired to a shared store, as a multi-replica deploy is."""
+    store = _SharedStore()
+    deps = booking_tools._deps
+    monkeypatch.setattr(
+        booking_tools,
+        "_deps",
+        booking_tools.BookingToolDeps(deps.unit_of_work, store),
+    )
+    return store
+
+
+def _restart_process() -> None:
+    """Drop everything this process was holding, keeping the shared store."""
+    booking_tools._OFFERED_SLOTS.clear()
+    booking_tools._ALTERNATIVE_QUEUES.clear()
+
+
+async def test_a_handle_minted_on_one_replica_resolves_on_another(shared) -> None:
+    """**The point of the work.** Mint here, redeem there, same instant.
+
+    Without the shared store this returns ``None`` and the booking costs an
+    extra availability check.
+    """
+    ctx = _context(uuid7())
+    offered = await booking_tools._check_availability(
+        ctx, {"service_code": "emergency"}
+    )
+    handle = offered.collected_data["offered_slot_ref"]
+    expected = offered.collected_data["offered_slot"]
+
+    _restart_process()
+
+    resolved = await booking_tools._decode_slot_ref(handle, ctx.tenant_id)
+    assert resolved is not None, (
+        "A handle minted on another replica must resolve here. If it does not, "
+        "every cross-pod booking silently costs an extra round-trip."
+    )
+    assert resolved.start_at.isoformat() == expected, (
+        "It must resolve to the instant the ENGINE computed — the whole reason "
+        "the model is not allowed to supply a time."
+    )
+
+
+async def test_the_alternative_queue_survives_a_replica_change(shared) -> None:
+    """"Anything earlier?" must work when the follow-up lands elsewhere."""
+    ctx = _context(uuid7())
+    first = await booking_tools._check_availability(ctx, {"service_code": "emergency"})
+
+    _restart_process()
+
+    second = await booking_tools._next_alternative(ctx, {"declined": "too early"})
+    assert second.collected_data.get("offered_slot_ref"), (
+        "The queue must be reachable from another replica, or a decline turns "
+        "into 'I do not have that search any more' and a fresh search."
+    )
+    assert second.collected_data["offered_slot"] > first.collected_data["offered_slot"]
+
+
+async def test_a_handle_from_another_tenant_never_resolves(shared) -> None:
+    """Tenant scoping is in the key, so a collision cannot cross tenants."""
+    ctx = _context(uuid7())
+    offered = await booking_tools._check_availability(
+        ctx, {"service_code": "emergency"}
+    )
+    handle = offered.collected_data["offered_slot_ref"]
+
+    _restart_process()
+
+    assert await booking_tools._decode_slot_ref(handle, uuid7()) is None
+
+
+async def test_a_store_outage_fails_closed_rather_than_guessing(shared) -> None:
+    """An unreachable store must not let a time be invented.
+
+    The store going away mid-conversation is indistinguishable from an expired
+    handle, and that is the intended degradation: the agent re-checks
+    availability. What must never happen is a resolution to something plausible.
+    """
+    ctx = _context(uuid7())
+    offered = await booking_tools._check_availability(
+        ctx, {"service_code": "emergency"}
+    )
+    handle = offered.collected_data["offered_slot_ref"]
+
+    _restart_process()
+    shared.data.clear()  # the store lost it, or is unreachable
+
+    assert await booking_tools._decode_slot_ref(handle, ctx.tenant_id) is None

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 from uuid import UUID
 
 from packages.ai.tools.builtin.booking import BookingToolDeps
@@ -38,8 +39,18 @@ from packages.persistence.session import SessionFactory
 __all__ = ["build_booking_tool_deps"]
 
 
-def build_booking_tool_deps(session_factory: SessionFactory) -> BookingToolDeps:
-    """The factory the booking tools call, closed over the session factory."""
+def build_booking_tool_deps(
+    session_factory: SessionFactory, conversation_state: Any | None = None
+) -> BookingToolDeps:
+    """The factory the booking tools call, closed over the session factory.
+
+    ``conversation_state`` is the shared store the tools keep slot handles and
+    alternative queues in — a
+    :class:`~packages.core.ports.conversation_state.ConversationStatePort`,
+    Redis-backed in the API. Passing ``None`` leaves the tools on their
+    in-process maps, which is correct for a single process and is what a test
+    without Redis gets.
+    """
 
     @asynccontextmanager
     async def unit_of_work(
@@ -50,4 +61,4 @@ def build_booking_tool_deps(session_factory: SessionFactory) -> BookingToolDeps:
             repository = BookingRepository(session)
             yield BookingService(repository), repository
 
-    return BookingToolDeps(unit_of_work)
+    return BookingToolDeps(unit_of_work, conversation_state)

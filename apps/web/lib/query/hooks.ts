@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import type {
@@ -13,10 +13,15 @@ import type {
   ChannelConfig,
   Conversation,
   ConversationDetail,
+  ConversationDetailDto,
+  ConversationSummaryDto,
+  CursorPage,
   HolidayException,
   KnowledgeSource,
   Member,
   Service,
+  TurnDto,
+  TurnRole,
   WeeklyHours,
 } from "@/lib/api/types";
 import { apiFetch } from "@/lib/api/client";
@@ -95,6 +100,19 @@ export function useOutcomeMix() {
   });
 }
 
+/**
+ * Whether the portal is wired to a real API.
+ *
+ * `NEXT_PUBLIC_API_LIVE` mirrors the server's `API_ORIGIN` (next.config.mjs
+ * installs the `/api/v1/*` rewrite only when that is set). Without the flag a
+ * calendar query would hit the Next dev server's 404 page, get HTML back, and
+ * fail with a JSON parse error — which reads as "the calendar is broken"
+ * rather than "there is no API here". Choosing the source explicitly keeps
+ * both worlds honest: with the flag on, a genuine API failure surfaces as an
+ * error state rather than being papered over by mock rows.
+ */
+const API_IS_LIVE = process.env.NEXT_PUBLIC_API_LIVE === "1";
+
 // --- Conversations ---------------------------------------------------------
 
 export interface ConversationFilters {
@@ -102,42 +120,217 @@ export interface ConversationFilters {
   channel?: string;
   outcome?: string;
   contained?: string;
+  /** RFC 3339 instant, inclusive. */
+  from?: string;
+  /** RFC 3339 instant, exclusive. */
+  to?: string;
 }
 
+/** Rows per request. The list keeps appending pages as the reader scrolls. */
+const CONVERSATION_PAGE_SIZE = 50;
+
+/**
+ * Widen the API's summary row into the shape the table renders.
+ *
+ * The fields left null are the ones the backend genuinely cannot answer yet:
+ * there is no `outcomes` table, no generated per-conversation summary, and no
+ * stored median. Filling them with a plausible-looking derivation would put
+ * numbers on screen that nothing stands behind — the table renders "—" for a
+ * null, which is honest, and the detail view computes its latencies from the
+ * turns it actually shows.
+ *
+ * `caller_name` / `caller_number` come back **already null** for a principal
+ * without `conversations:read_pii`. This function does not mask anything; the
+ * masking happened on the server, which is the only place it counts.
+ */
+function toConversation(row: ConversationSummaryDto): Conversation {
+  return {
+    id: row.id,
+    channel: row.channel,
+    status: row.status,
+    outcome: row.outcome,
+    caller_number: row.contact_identifier,
+    caller_name: row.contact_name,
+    started_at: row.started_at,
+    ended_at: row.ended_at,
+    duration_seconds: row.duration_seconds,
+    turn_count: row.turn_count,
+    contained: row.contained,
+    median_reply_ms: null,
+    cost: null,
+    // The caller's opening line stands in for a summary: it is the one piece
+    // of text that makes a row scannable, and it is what actually happened
+    // rather than a model's paraphrase of it.
+    summary: row.opening_line,
+    intent: row.agent_code,
+    sentiment: null,
+  };
+}
+
+/**
+ * The conversation list, paginated by cursor.
+ *
+ * `useInfiniteQuery` maps onto the cursor API exactly: `next_cursor` becomes
+ * the next `pageParam`, and a null one ends the list. With 3,000+ rows in a
+ * modest tenant, rendering everything is not an option — and offset paging is
+ * not offered by the API at all, because these tables are partitioned by month
+ * and an offset cannot prune a partition.
+ *
+ * The filters that the API understands (`channel`, `q`, the date range) are
+ * sent to the server. `outcome` and `contained` are applied to the rows that
+ * come back, because both are DERIVED server-side from status and escalation
+ * rather than stored — pushing them down would mean the API filtering on a
+ * column that does not exist. That is a real limitation: a filter applied
+ * after paging can leave a page looking short. It is called out here rather
+ * than hidden, and it disappears when the `outcomes` table lands.
+ */
 export function useConversations(filters: ConversationFilters) {
   const keys = useKeys();
-  return useQuery<Conversation[]>({
+
+  const query = useInfiniteQuery({
     queryKey: keys.conversations.list(filters),
-    queryFn: () => {
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam }): Promise<CursorPage<Conversation>> => {
+      if (API_IS_LIVE) {
+        const params = new URLSearchParams({ limit: String(CONVERSATION_PAGE_SIZE) });
+        if (pageParam) params.set("cursor", pageParam);
+        if (filters.channel && filters.channel !== "all") params.set("channel", filters.channel);
+        const q = filters.q?.trim();
+        if (q) params.set("q", q);
+        if (filters.from) params.set("from", filters.from);
+        if (filters.to) params.set("to", filters.to);
+
+        const page = await apiFetch<CursorPage<ConversationSummaryDto>>(
+          `/api/v1/conversations?${params}`,
+        );
+        return {
+          items: page.items.map(toConversation),
+          next_cursor: page.next_cursor,
+          has_more: page.has_more,
+        };
+      }
+
+      // Demo mode: one page of mock rows, filtered in the browser. A clean
+      // clone with no API must still render every screen.
       const q = filters.q?.trim().toLowerCase();
       const filtered = MOCK_CONVERSATIONS.filter((c) => {
         if (filters.channel && filters.channel !== "all" && c.channel !== filters.channel) return false;
-        if (filters.outcome && filters.outcome !== "all" && c.outcome !== filters.outcome) return false;
-        if (filters.contained === "yes" && !c.contained) return false;
-        if (filters.contained === "no" && c.contained) return false;
         if (q) {
           const hay = `${c.caller_name ?? ""} ${c.caller_number ?? ""} ${c.summary ?? ""} ${c.intent ?? ""}`.toLowerCase();
           if (!hay.includes(q)) return false;
         }
         return true;
       });
-      return mockResolve(filtered);
+      return mockResolve({ items: filtered, next_cursor: null, has_more: false });
     },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
     // A list the user is filtering should feel immediate; keeping the previous
     // page visible while the next resolves avoids a flash of empty table on
     // every keystroke.
     placeholderData: (prev) => prev,
     staleTime: 15_000,
   });
+
+  // The outcome/contained filters are applied here — see the note above.
+  const rows = useMemo(() => {
+    const all = query.data?.pages.flatMap((page) => page.items) ?? [];
+    return all.filter((c) => {
+      if (filters.outcome && filters.outcome !== "all" && c.outcome !== filters.outcome) {
+        return false;
+      }
+      if (filters.contained === "yes" && !c.contained) return false;
+      if (filters.contained === "no" && c.contained) return false;
+      return true;
+    });
+  }, [query.data, filters.outcome, filters.contained]);
+
+  return { ...query, rows };
 }
 
+/**
+ * One conversation with its transcript.
+ *
+ * The turn's `role` is translated from the API's vocabulary
+ * (`user`/`assistant`) to the UI's (`caller`/`desk`) here rather than in the
+ * viewer, so the transcript component keeps one vocabulary regardless of where
+ * its data came from.
+ */
 export function useConversation(id: string) {
   const keys = useKeys();
   return useQuery<ConversationDetail>({
     queryKey: keys.conversations.detail(id),
-    queryFn: () => mockResolve(mockConversationDetail(id)),
+    queryFn: async () => {
+      if (API_IS_LIVE) {
+        const dto = await apiFetch<ConversationDetailDto>(`/api/v1/conversations/${id}`);
+        return toConversationDetail(dto);
+      }
+      return mockResolve(mockConversationDetail(id));
+    },
     enabled: Boolean(id),
   });
+}
+
+/** The API's turn roles, mapped onto the two the transcript speaks in. */
+const TURN_ROLE: Record<TurnDto["role"], TurnRole> = {
+  user: "caller",
+  assistant: "desk",
+  system: "system",
+  tool: "system",
+  event: "system",
+};
+
+function toConversationDetail(dto: ConversationDetailDto): ConversationDetail {
+  // `tool` and `event` turns are lifecycle bookkeeping, not things anyone
+  // said. Showing them would put empty rows through the middle of a
+  // transcript, which reads as data loss rather than as detail.
+  const turns = dto.turns
+    .filter((t) => t.role === "user" || t.role === "assistant")
+    .map((t) => ({
+      id: t.id,
+      role: TURN_ROLE[t.role],
+      // A masked turn comes back null. The em dash is a rendered placeholder,
+      // NOT a mask — the value was already absent when it arrived.
+      content: t.content ?? "—",
+      agent_node: t.agent_node,
+      started_at: t.created_at,
+      latency_ms: t.latency_ms,
+      tool_calls: [],
+      finish_reason: (t.finish_reason ?? null) as ConversationDetail["turns"][number]["finish_reason"],
+      interrupted: t.interrupted ?? false,
+      usage: t.usage,
+    }));
+
+  const durationSeconds =
+    dto.ended_at !== null
+      ? Math.max(
+          0,
+          Math.round(
+            (new Date(dto.ended_at).getTime() - new Date(dto.started_at).getTime()) / 1000,
+          ),
+        )
+      : null;
+
+  return {
+    id: dto.id,
+    channel: dto.channel,
+    status: dto.status,
+    outcome: dto.outcome,
+    caller_number: null,
+    caller_name: null,
+    started_at: dto.started_at,
+    ended_at: dto.ended_at,
+    duration_seconds: durationSeconds,
+    turn_count: dto.turn_count,
+    contained: !dto.escalated,
+    median_reply_ms: null,
+    cost: null,
+    summary: null,
+    intent: dto.agent_code,
+    sentiment: null,
+    turns,
+    transfer_reason: null,
+    recording_url: null,
+  };
 }
 
 export function useLiveConversations() {
@@ -154,19 +347,6 @@ export function useLiveConversations() {
 }
 
 // --- The diary -------------------------------------------------------------
-
-/**
- * Whether the portal is wired to a real API.
- *
- * `NEXT_PUBLIC_API_LIVE` mirrors the server's `API_ORIGIN` (next.config.mjs
- * installs the `/api/v1/*` rewrite only when that is set). Without the flag a
- * calendar query would hit the Next dev server's 404 page, get HTML back, and
- * fail with a JSON parse error — which reads as "the calendar is broken"
- * rather than "there is no API here". Choosing the source explicitly keeps
- * both worlds honest: with the flag on, a genuine API failure surfaces as an
- * error state rather than being papered over by mock rows.
- */
-const API_IS_LIVE = process.env.NEXT_PUBLIC_API_LIVE === "1";
 
 export interface CalendarFilters {
   /** A resource id, or "all". Never a name — a tenant can rename a resource. */

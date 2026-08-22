@@ -24,12 +24,15 @@ from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from packages.ai.tools.builtin import booking as booking_tools
 from packages.ai.tools.builtin.booking import (
     _decode_slot_ref,
     _mint_slot_ref,
     _to_utc,
 )
+from packages.booking.domain import Slot
 from packages.booking.service import BookingService
+from packages.core.ids import uuid7
 from packages.persistence.repositories.booking import BookingRepository
 from sqlalchemy import text
 
@@ -70,10 +73,10 @@ async def test_the_offered_slot_is_the_booked_slot_to_the_second(
         offered = slots[0]
         # What the caller is told, and what the engine actually computed.
         offered_local = offered.start_at.astimezone(LONDON)
-        reference = _mint_slot_ref(offered, spec.code)
+        reference = await _mint_slot_ref(offered, spec.code, fixture.tenant_id)
 
         # The model hands the reference back rather than retyping a time.
-        decoded = _decode_slot_ref(reference)
+        decoded = await _decode_slot_ref(reference, fixture.tenant_id)
         assert decoded is not None
         assert decoded.start_at == offered.start_at, (
             "The reference must carry the engine's own instant. If it round-trips "
@@ -134,8 +137,8 @@ async def test_the_offered_clinician_is_the_booked_clinician(
         offered_names = {
             resources[r].name for r in offered.resource_ids if r in resources
         }
-        reference = _mint_slot_ref(offered, spec.code)
-        decoded = _decode_slot_ref(reference)
+        reference = await _mint_slot_ref(offered, spec.code, fixture.tenant_id)
+        decoded = await _decode_slot_ref(reference, fixture.tenant_id)
         assert decoded is not None
         assert set(decoded.resource_ids) == set(offered.resource_ids), (
             "The reference must carry the resources that were offered, or the "
@@ -183,17 +186,44 @@ def test_a_real_offset_is_still_honoured() -> None:
     assert parsed == datetime(2026, 8, 10, 8, 0, tzinfo=UTC)
 
 
-def test_a_reference_from_another_process_is_refused_not_guessed() -> None:
-    """A reference that fails its digest must not decode.
+async def test_a_reference_from_another_process_is_refused_not_guessed() -> None:
+    """A reference we did not mint must not decode.
 
     Refusing sends the agent back to ``check_availability``, which it knows how
     to recover from. Guessing would book a plausible-looking wrong instant, which
     is the exact class of silent failure this mechanism removes.
+
+    Still true now the handles are shared through Redis: the store can only
+    return what was put in it, so an unknown handle is unresolvable on every
+    replica rather than merely on the one that did not mint it.
     """
-    assert _decode_slot_ref("not-a-reference") is None
-    assert _decode_slot_ref("") is None
-    # Correct shape, wrong signature.
-    assert _decode_slot_ref("aGVsbG8.deadbeef") is None
+    tenant = uuid7()
+    assert await _decode_slot_ref("not-a-reference", tenant) is None
+    assert await _decode_slot_ref("", tenant) is None
+    # Correct shape, never minted.
+    assert await _decode_slot_ref("aGVsbG8.deadbeef", tenant) is None
+
+
+async def test_a_handle_does_not_resolve_across_tenants() -> None:
+    """A handle minted for one tenant must be invisible to another.
+
+    The handles are four bytes of entropy and now live in a store shared by
+    every tenant, so collisions are a question of time rather than of luck. The
+    tenant is part of the key precisely so the wrong-tenant lookup finds nothing
+    and fails closed, instead of resolving to somebody else's appointment time.
+    """
+    mine, theirs = uuid7(), uuid7()
+    slot = Slot(
+        start_at=datetime(2026, 8, 11, 9, 0, tzinfo=UTC),
+        end_at=datetime(2026, 8, 11, 9, 30, tzinfo=UTC),
+        allocations=(),
+    )
+    handle = await _mint_slot_ref(slot, "standard", mine)
+    # Cleared so the lookup is answered by the shared store rather than by the
+    # in-process map, which is not tenant-scoped and is only ever a fallback.
+    booking_tools._OFFERED_SLOTS.clear()
+
+    assert await _decode_slot_ref(handle, theirs) is None
 
 
 async def test_a_dst_boundary_slot_round_trips_exactly(
@@ -235,7 +265,9 @@ async def test_a_dst_boundary_slot_round_trips_exactly(
 
         offered = slots[0]
         offered_local = offered.start_at.astimezone(LONDON)
-        decoded = _decode_slot_ref(_mint_slot_ref(offered, spec.code))
+        decoded = await _decode_slot_ref(
+            await _mint_slot_ref(offered, spec.code, fixture.tenant_id), fixture.tenant_id
+        )
         assert decoded is not None
 
         booking = await service.book(

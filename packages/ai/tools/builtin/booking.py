@@ -27,10 +27,12 @@ immediately (:func:`_to_utc`) and everything crossing outward is converted back
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Final
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -43,7 +45,15 @@ from packages.ai.tools.registry import (
     ToolSpec,
     object_schema,
 )
-from packages.booking.domain import BookingRecord, CancellationQuote, Slot
+from packages.booking.domain import (
+    AllocationCandidate,
+    BookingRecord,
+    CancellationQuote,
+    RequirementSpec,
+    ResourceSpec,
+    ServiceSpec,
+    Slot,
+)
 from packages.booking.service import SlotUnavailableError, quote_cancellation
 from packages.core.errors import ConfigurationError, ValidationError
 
@@ -98,12 +108,25 @@ class _AlternativeQueue:
 
 #: Conversation id -> the search it is working through.
 #:
-#: Same bounded, in-process treatment as `_OFFERED_SLOTS`, and the same known
-#: limit: behind more than one API replica a follow-up landing on a different
-#: pod finds no queue and is told to search again, which is the correct
-#: recovery and one the agent already handles.
+#: **Fallback only.** The queue now lives in the shared store behind
+#: :class:`~packages.core.ports.conversation_state.ConversationStatePort`, so a
+#: follow-up landing on a different replica finds it. This dict is what remains
+#: when no store is installed (a graph test, a worker that never wired one) or
+#: when a write to it failed — in which case behaviour is exactly what it was
+#: before: single-process, and a cross-pod follow-up is told to search again,
+#: which is the correct recovery and one the agent already handles.
 _ALTERNATIVE_QUEUES: dict[str, _AlternativeQueue] = {}
 _ALTERNATIVE_QUEUES_MAX: Final = 500
+
+#: How long a search stays walkable with `next_alternative`.
+#:
+#: Taken from ``DEFAULT_SESSION_TTL_SECONDS`` in ``apps/api/tickets.py`` (1800),
+#: not chosen: the queue is reachable exactly as long as the conversation that
+#: owns it, and a caller who can still type is a caller whose "anything
+#: earlier?" must still work. A shorter TTL would expire the queue underneath a
+#: live conversation; a longer one would keep a search alive after the
+#: credential that could reach it had gone.
+_QUEUE_TTL_SECONDS: Final = 1_800
 
 
 class BookingToolDeps:
@@ -120,10 +143,30 @@ class BookingToolDeps:
     of work, so a tool's writes commit or roll back on their own — a tool must not
     join the caller's transaction, because a tool failure after a successful
     booking would otherwise roll the booking back too.
+
+    ``conversation_state`` arrives by the same route and for the same reason: it
+    is a :class:`~packages.core.ports.conversation_state.ConversationStatePort`,
+    implemented over Redis in ``packages/providers``, and installing it here is
+    what makes a slot handle minted on one replica redeemable on another. It is
+    optional — ``None`` leaves the tools on their in-process maps, which is the
+    behaviour every graph test relies on and the correct degradation when Redis
+    is absent.
     """
 
-    def __init__(self, unit_of_work: Any) -> None:
+    def __init__(self, unit_of_work: Any, conversation_state: Any | None = None) -> None:
         self.unit_of_work = unit_of_work
+        self.conversation_state = conversation_state
+
+
+def _state_port() -> Any | None:
+    """The shared store, or ``None`` when the tools were wired without one.
+
+    Deliberately tolerant of a missing ``_deps``: the state helpers below are
+    reached from paths that must not raise merely because no database was wired,
+    and "no shared store" is already a supported state.
+    """
+    deps = _deps
+    return getattr(deps, "conversation_state", None) if deps is not None else None
 
 
 _deps: BookingToolDeps | None = None
@@ -210,54 +253,310 @@ class _OfferedSlot:
 
 #: Handle -> offered slot, for slots offered recently.
 #:
-#: In-process and bounded. A slot is a derived fact with no identity of its own
-#: (01 §5.6 — availability is computed, never stored), so persisting one would
-#: mean inventing a lifecycle and a sweeper for something that lives as long as
-#: one sentence. A handle that has fallen out of the map fails closed: the agent
-#: is told to re-check availability, which is the recovery it already knows.
+#: **Fallback only, since the move to a shared store.** The authoritative copy
+#: lives behind
+#: :class:`~packages.core.ports.conversation_state.ConversationStatePort`, which
+#: is what lets `check_availability` on one replica and `book_appointment` on
+#: another agree about which instant was offered. This dict still exists because
+#: the store is optional: a graph test binds none, and a write failure must not
+#: cost a booking. In both cases behaviour reverts to what it was before —
+#: per-process, and a cross-pod redeem takes an extra availability round-trip.
 #:
-#: Known bound, stated rather than discovered: this is per-process, so behind
-#: more than one API replica a handle minted on one pod will not resolve on
-#: another and that booking takes an extra availability round-trip. Moving the
-#: map to Redis is the fix at that point; it is not done now because Phase 1 has
-#: one process and a shared store would be a dependency with no way to exercise
-#: it.
+#: A handle that resolves in neither place fails closed: the agent is told to
+#: re-check availability, which is the recovery it already knows. That is the
+#: property that makes every degradation path here safe — an unresolvable handle
+#: can only cost a round-trip, never a wrong time.
 _OFFERED_SLOTS: dict[str, _OfferedSlot] = {}
 
 #: Enough for many concurrent conversations, small enough to be free. Evicted
 #: oldest-first, which for a dict in insertion order is the front.
 _OFFERED_SLOTS_MAX: Final = 2_000
 
+#: How long a minted handle stays redeemable.
+#:
+#: Taken from ``MAX_HOLD_TTL_SECONDS`` in ``packages/booking/holds.py`` (900),
+#: not picked for roundness. That constant is the longest the engine will hold
+#: capacity for an unconfirmed booking, which makes it the longest an offer can
+#: still be honoured: past it the slot may legitimately belong to someone else,
+#: so a handle that outlived it would resolve to an instant the engine would
+#: then refuse. Expiring with the hold means the failure surfaces as "re-check
+#: availability" instead of as a booking conflict.
+_SLOT_REF_TTL_SECONDS: Final = 900
 
-def _mint_slot_ref(slot: Slot, service_code: str) -> str:
+
+def _encode_offered_slot(offered: _OfferedSlot) -> str:
+    """An offered slot as JSON. Three scalars — no generic machinery needed."""
+    return json.dumps(
+        {
+            "service_code": offered.service_code,
+            "start_at": offered.start_at.isoformat(),
+            "resource_ids": [str(r) for r in offered.resource_ids],
+        }
+    )
+
+
+def _decode_offered_slot(raw: str) -> _OfferedSlot | None:
+    """The inverse, or ``None`` on anything malformed.
+
+    Returning ``None`` rather than raising is what lets a corrupt or
+    older-format entry behave as an expired one. A decode error here must cost a
+    round-trip, not a conversation.
+    """
+    try:
+        payload = json.loads(raw)
+        return _OfferedSlot(
+            service_code=str(payload["service_code"]),
+            start_at=datetime.fromisoformat(payload["start_at"]),
+            resource_ids=tuple(UUID(r) for r in payload["resource_ids"]),
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+# ── Serialising the alternative queue ────────────────────────────────────────
+#
+# The queue carries engine dataclasses — `Slot`, `ServiceSpec`, `ResourceSpec` —
+# which are frozen, slotted, and built from scalars, UUIDs, datetimes, Decimals
+# and nested dataclasses of the same. That is a small enough shape to walk
+# generically, and walking it generically is what stops this code needing an
+# edit every time the engine gains a field. The alternative — a hand-written
+# encoder per class — is three functions that fall silently out of date, and the
+# symptom of a missed field is a slot whose price or buffer quietly resets.
+#
+# Types are tagged on the way out and resolved on the way back, so the decode
+# reconstructs the real class rather than a dict that merely quacks like one:
+# `_offer` reads `service.name` and `slot.start_at`, and a dict would fail on
+# attribute access rather than on the boundary where the problem is.
+
+#: The engine classes a queue may contain, by tag. An explicit allow-list, not a
+#: dynamic import: this decodes data from a shared store, and resolving an
+#: arbitrary dotted path out of it would be a remote-code-execution hole rather
+#: than a convenience.
+_DECODABLE: Final[dict[str, Any]] = {
+    "Slot": Slot,
+    "AllocationCandidate": AllocationCandidate,
+    "ServiceSpec": ServiceSpec,
+    "ResourceSpec": ResourceSpec,
+    "RequirementSpec": RequirementSpec,
+}
+
+
+def _to_jsonable(value: Any) -> Any:
+    """One value as JSON-safe data, tagging what will need reconstructing."""
+    if is_dataclass(value) and not isinstance(value, type):
+        name = type(value).__name__
+        if name not in _DECODABLE:
+            raise TypeError(f"{name} is not serialisable into conversation state")
+        return {
+            "__type__": name,
+            "fields": {
+                f.name: _to_jsonable(getattr(value, f.name)) for f in fields(value)
+            },
+        }
+    if isinstance(value, datetime):
+        return {"__type__": "datetime", "value": value.isoformat()}
+    if isinstance(value, UUID):
+        return {"__type__": "uuid", "value": str(value)}
+    if isinstance(value, Decimal):
+        # As a string: a Decimal through a float loses exactly the precision it
+        # exists to keep, and this carries prices.
+        return {"__type__": "decimal", "value": str(value)}
+    if isinstance(value, dict):
+        # Keys may be UUIDs (the resource map is keyed by resource id), which
+        # JSON cannot express, so they are stringified and restored on the way
+        # back by the same tag machinery applied to the key.
+        return {
+            "__type__": "map",
+            "entries": [[_to_jsonable(k), _to_jsonable(v)] for k, v in value.items()],
+        }
+    if isinstance(value, (list, tuple)):
+        return {
+            "__type__": "seq",
+            "tuple": isinstance(value, tuple),
+            "items": [_to_jsonable(v) for v in value],
+        }
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"{type(value).__name__} is not serialisable into conversation state")
+
+
+def _from_jsonable(value: Any) -> Any:
+    """The inverse of :func:`_to_jsonable`."""
+    if not isinstance(value, dict):
+        return value
+    kind = value.get("__type__")
+    if kind is None:
+        return value
+    if kind == "datetime":
+        return datetime.fromisoformat(value["value"])
+    if kind == "uuid":
+        return UUID(value["value"])
+    if kind == "decimal":
+        return Decimal(value["value"])
+    if kind == "map":
+        return {_from_jsonable(k): _from_jsonable(v) for k, v in value["entries"]}
+    if kind == "seq":
+        items = [_from_jsonable(v) for v in value["items"]]
+        return tuple(items) if value.get("tuple") else items
+    cls = _DECODABLE.get(kind)
+    if cls is None:
+        raise ValueError(f"unknown tagged type {kind!r}")
+    return cls(**{k: _from_jsonable(v) for k, v in value["fields"].items()})
+
+
+def _encode_queue(queue: _AlternativeQueue) -> str:
+    return json.dumps(
+        {
+            "slots": _to_jsonable(list(queue.slots)),
+            "index": queue.index,
+            "service": _to_jsonable(queue.service),
+            "timezone": queue.timezone,
+            "resources": _to_jsonable(queue.resources),
+        }
+    )
+
+
+def _decode_queue(raw: str) -> _AlternativeQueue | None:
+    """A stored queue, or ``None`` on anything malformed.
+
+    ``None`` lands the caller on "I do not have that search any more", which is
+    an answer the agent already handles, so a decode failure degrades to a fresh
+    availability check rather than to an error.
+    """
+    try:
+        payload = json.loads(raw)
+        return _AlternativeQueue(
+            slots=list(_from_jsonable(payload["slots"])),
+            index=int(payload["index"]),
+            service=_from_jsonable(payload["service"]),
+            timezone=str(payload["timezone"]),
+            resources=_from_jsonable(payload["resources"]),
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+async def _load_queue(tenant_id: Any, conversation_id: Any) -> _AlternativeQueue | None:
+    """The conversation's current search, from this process or the shared store.
+
+    Local first, for the same reason as a slot handle: when the search ran on
+    this replica the local copy is authoritative and free. The shared store is
+    what makes "anything earlier?" work when the follow-up lands elsewhere.
+    """
+    if (local := _ALTERNATIVE_QUEUES.get(str(conversation_id))) is not None:
+        return local
+    if (store := _state_port()) is None:
+        return None
+    raw = await store.get(_queue_key(tenant_id, conversation_id))
+    if raw is None:
+        return None
+    queue = _decode_queue(raw)
+    if queue is None:
+        log.warning("booking.alternatives.undecodable")
+        return None
+    return queue
+
+
+def _slot_key(tenant_id: Any, handle: str) -> str:
+    """The shared-store key for one handle, scoped to its tenant.
+
+    **The tenant is in the key, not merely alongside the value.** A handle is 4
+    bytes of entropy; two tenants will eventually mint the same string, and a
+    lookup that found the other tenant's entry would leak an appointment time
+    and the resources allocated to it, then book against them. Scoping the key
+    makes that impossible rather than unlikely — the wrong-tenant read finds
+    nothing and fails closed.
+    """
+    return f"slotref:{tenant_id}:{handle}"
+
+
+def _queue_key(tenant_id: Any, conversation_id: Any) -> str:
+    """The shared-store key for one conversation's alternative queue."""
+    return f"altqueue:{tenant_id}:{conversation_id}"
+
+
+async def _mint_slot_ref(slot: Slot, service_code: str, tenant_id: Any) -> str:
     """Register an offered slot and return the handle that stands for it.
 
     The handle is the ONLY thing the model receives. It carries the instant the
     engine computed and the resources it allocated — so booking the handle books
     exactly what was offered, with the clinician who was named — while revealing
     none of that to anyone who reads it.
+
+    Written to the shared store when one is installed, so the redeem may land on
+    any replica. The in-process map is written **as well as**, not instead of:
+    the local read is free, and it is what keeps the tool working if the store
+    goes away between the mint and the redeem.
     """
     handle = f"{_SLOT_HANDLE_PREFIX}{secrets.token_hex(_SLOT_HANDLE_BYTES)}"
-    if len(_OFFERED_SLOTS) >= _OFFERED_SLOTS_MAX:
-        for stale in list(_OFFERED_SLOTS)[: _OFFERED_SLOTS_MAX // 4]:
-            _OFFERED_SLOTS.pop(stale, None)
-    _OFFERED_SLOTS[handle] = _OfferedSlot(
+    offered = _OfferedSlot(
         service_code=service_code,
         start_at=slot.start_at,
         resource_ids=tuple(slot.resource_ids),
     )
+
+    if len(_OFFERED_SLOTS) >= _OFFERED_SLOTS_MAX:
+        for stale in list(_OFFERED_SLOTS)[: _OFFERED_SLOTS_MAX // 4]:
+            _OFFERED_SLOTS.pop(stale, None)
+    _OFFERED_SLOTS[handle] = offered
+
+    if (store := _state_port()) is not None:
+        try:
+            await store.set(
+                _slot_key(tenant_id, handle),
+                _encode_offered_slot(offered),
+                ttl_seconds=_SLOT_REF_TTL_SECONDS,
+            )
+        except Exception as exc:
+            # Not fatal, and deliberately not silent. The handle still resolves
+            # in this process, so this conversation completes; what is lost is
+            # the cross-replica property, and a sustained rate of this line is
+            # the signal that bookings are quietly costing an extra round-trip.
+            log.warning(
+                "booking.slot_ref.share_failed",
+                error=type(exc).__name__,
+                impact="handle resolves only in this process",
+            )
     return handle
 
 
-def _decode_slot_ref(reference: str) -> _OfferedSlot | None:
+async def _decode_slot_ref(reference: str, tenant_id: Any) -> _OfferedSlot | None:
     """Resolve a handle, or ``None`` if it is not one we offered.
 
-    ``None`` for anything unknown — expired, invented, or from a previous
-    process. The caller turns that into "call check_availability again", which is
-    the correct recovery. Guessing would book a plausible-looking wrong instant,
-    which is the entire class of failure this mechanism removes.
+    ``None`` for anything unknown — expired, invented, or minted by a process
+    that has since gone away. The caller turns that into "call
+    check_availability again", which is the correct recovery. Guessing would
+    book a plausible-looking wrong instant, which is the entire class of failure
+    this mechanism removes.
+
+    The local map is consulted first because it is free and, when the mint
+    happened on this replica, always right. The shared store is the fallback
+    that makes a handle minted elsewhere resolve here.
     """
-    return _OFFERED_SLOTS.get(reference.strip())
+    handle = reference.strip()
+    if not handle:
+        return None
+    if (local := _OFFERED_SLOTS.get(handle)) is not None:
+        return local
+
+    if (store := _state_port()) is None:
+        return None
+    # `get` on the Redis adapter folds its own failures into `None`, so a store
+    # outage arrives here as "unknown handle" — which is a recoverable state the
+    # caller already handles, not an error worth failing a booking over.
+    raw = await store.get(_slot_key(tenant_id, handle))
+    if raw is None:
+        return None
+    decoded = _decode_offered_slot(raw)
+    if decoded is None:
+        # Corrupt or from an incompatible version. Treated as absent for the
+        # same reason a bad handle is: the only safe answer is "search again".
+        log.warning("booking.slot_ref.undecodable")
+        return None
+    # Cache the cross-replica hit, so a redeem and any follow-up on this pod do
+    # not each pay a round-trip for a value that cannot change.
+    _OFFERED_SLOTS[handle] = decoded
+    return decoded
 
 
 def _zone(name: str) -> ZoneInfo:
@@ -592,13 +891,14 @@ async def _check_availability(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
     # exactly right — soonest wins — and for a routine booking the solver has
     # already applied the tenant's allocation strategy, so "first" means "best
     # by whatever the practice configured".
-    return _offer(
+    return await _offer(
         slots=slots,
         index=0,
         service=service,
         tz=tz,
         resources=resources,
         conversation_id=ctx.conversation_id,
+        tenant_id=ctx.tenant_id,
     )
 
 
@@ -609,7 +909,7 @@ async def _next_alternative(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
     single in-scope handle for the next one, so the model still holds exactly
     one — declining ten times in a row never puts two in its context.
     """
-    queue = _ALTERNATIVE_QUEUES.get(str(ctx.conversation_id))
+    queue = await _load_queue(ctx.tenant_id, ctx.conversation_id)
     if queue is None:
         return ToolResult(
             content=(
@@ -628,17 +928,18 @@ async def _next_alternative(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
             structured={"exhausted": True},
         )
 
-    return _offer(
+    return await _offer(
         slots=queue.slots,
         index=queue.index + 1,
         service=queue.service,
         tz=queue.timezone,
         resources=queue.resources,
         conversation_id=ctx.conversation_id,
+        tenant_id=ctx.tenant_id,
     )
 
 
-def _offer(
+async def _offer(
     *,
     slots: list[Slot],
     index: int,
@@ -646,26 +947,45 @@ def _offer(
     tz: str,
     resources: dict[Any, Any],
     conversation_id: Any,
+    tenant_id: Any,
 ) -> ToolResult:
     """Present exactly one slot, and remember the rest server-side."""
     # A fresh `check_availability` REPLACES the queue for this conversation
     # (`_offer` is the only writer, and it overwrites). That is what stops a
     # caller who switches from Tuesday to Thursday being walked through
     # Tuesday's remaining slots — the observed failure, where every reply after
-    # "Thursday instead" kept offering later times on Tuesday.
+    # "Thursday instead" kept offering later times on Tuesday. The shared store
+    # is overwritten with the same key for the same reason.
     slot = slots[index]
-    if len(_ALTERNATIVE_QUEUES) >= _ALTERNATIVE_QUEUES_MAX:
-        for stale in list(_ALTERNATIVE_QUEUES)[: _ALTERNATIVE_QUEUES_MAX // 4]:
-            _ALTERNATIVE_QUEUES.pop(stale, None)
-    _ALTERNATIVE_QUEUES[str(conversation_id)] = _AlternativeQueue(
+    queue = _AlternativeQueue(
         slots=list(slots),
         index=index,
         service=service,
         timezone=tz,
         resources=resources,
     )
+    if len(_ALTERNATIVE_QUEUES) >= _ALTERNATIVE_QUEUES_MAX:
+        for stale in list(_ALTERNATIVE_QUEUES)[: _ALTERNATIVE_QUEUES_MAX // 4]:
+            _ALTERNATIVE_QUEUES.pop(stale, None)
+    _ALTERNATIVE_QUEUES[str(conversation_id)] = queue
 
-    handle = _mint_slot_ref(slot, service.code)
+    if (store := _state_port()) is not None:
+        try:
+            await store.set(
+                _queue_key(tenant_id, conversation_id),
+                _encode_queue(queue),
+                ttl_seconds=_QUEUE_TTL_SECONDS,
+            )
+        except Exception as exc:
+            # The offer itself is unaffected — only "anything earlier?" on a
+            # different replica is, and that already degrades to a fresh search.
+            log.warning(
+                "booking.alternatives.share_failed",
+                error=type(exc).__name__,
+                impact="next_alternative works only on this process",
+            )
+
+    handle = await _mint_slot_ref(slot, service.code, tenant_id)
     # The exact words to say. Given verbatim because paraphrasing a time is how
     # "5:30" became "5:00" in a caller's ear while the handle held 17:00 — one
     # handle in scope, so not the old multi-handle bug, simply a model restating
@@ -823,7 +1143,7 @@ async def _book_appointment(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
         # instant comes from the ENGINE and the model's arithmetic never enters
         # the picture. That is the whole fix: a caller offered "1:30" gets 1:30,
         # not a UTC-flavoured 2:30.
-        decoded = _decode_slot_ref(str(args.get("slot_ref") or ""))
+        decoded = await _decode_slot_ref(str(args.get("slot_ref") or ""), ctx.tenant_id)
         service_code = args.get("service_code") or ""
         if decoded is not None:
             start_at = decoded.start_at
@@ -998,7 +1318,7 @@ async def _reschedule_booking(ctx: ToolContext, args: dict[str, Any]) -> ToolRes
 
         # Same precedence as booking: an engine-minted reference beats a
         # model-composed time, for the same reason.
-        decoded = _decode_slot_ref(str(args.get("slot_ref") or ""))
+        decoded = await _decode_slot_ref(str(args.get("slot_ref") or ""), ctx.tenant_id)
         if decoded is not None:
             new_start = decoded.start_at
         elif args.get("new_start_time"):

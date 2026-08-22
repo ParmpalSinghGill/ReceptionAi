@@ -54,6 +54,7 @@ from packages.persistence.engine import DEFAULT_SHARD, ConnectionRouter, ShardCo
 from packages.persistence.session import SessionFactory
 from packages.providers.llm import LLMProviderSettings, build_llm_adapter
 from packages.providers.observability import build_langfuse_tracer
+from packages.providers.state import RedisConversationState
 from sqlalchemy import text
 
 __all__ = ["build_app_state", "create_app"]
@@ -138,7 +139,19 @@ async def build_app_state(settings: Settings) -> AppState:
     # ``ConfigurationError`` rather than reaching for a pool that does not exist
     # — fail-closed, so "the tools were never wired" is an error someone sees
     # rather than a booking that silently never happened.
-    set_booking_dependencies(build_booking_tool_deps(session_factory))
+    #
+    # The same call installs the shared conversation store, which is what makes
+    # a slot handle minted by `check_availability` on this replica redeemable by
+    # `book_appointment` on another. Without Redis it is ``None`` and the tools
+    # fall back to in-process maps: correct for one process, and behind several
+    # it costs a cross-pod booking one extra availability check rather than
+    # letting the model compose a time.
+    set_booking_dependencies(
+        build_booking_tool_deps(
+            session_factory,
+            RedisConversationState(redis) if redis is not None else None,
+        )
+    )
 
     graph_cache = build_graph_cache(
         session_factory=session_factory, llm=llm, tools=tools

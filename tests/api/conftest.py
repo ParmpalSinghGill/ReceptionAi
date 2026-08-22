@@ -147,28 +147,80 @@ def demo_tenant_id(app) -> UUID:
     return tenant_id
 
 
+#: Credentials the seed has used for the demo owner, newest first.
+#:
+#: Resolved by trying each rather than hardcoding one, because the demo tenant
+#: has been renamed once already (Northgate Dental → Sunrise Dental) and the
+#: hardcoded pair silently turned every test that depends on this fixture into
+#: a SKIP. A suite that skips is worse than one that fails: it reports green
+#: while asserting nothing, and five of the six booking tests sat in that state
+#: undetected. Listing the alternatives keeps the fixture working across a
+#: rename instead of rotting on the next one.
+_DEMO_LOGINS: tuple[tuple[str, str], ...] = (
+    ("demo@sunrisedental.in", "sunrise-dental"),
+    ("demo@northgate.dental", "northgate-dental"),
+)
+
+
 @pytest_asyncio.fixture
 async def access_token(client) -> str:
     """A bearer token for the seeded demo owner."""
-    response = await client.post(
-        "/api/v1/auth/login",
-        json={
-            "email": "demo@northgate.dental",
-            "password": "demo1234",
-            "tenant_slug": "northgate-dental",
-        },
-    )
-    if response.status_code != 200:
-        pytest.skip(
-            f"cannot log in as the seeded demo user ({response.status_code}); "
-            f"run `python3 tools/seed_demo.py`"
+    attempts = []
+    for email, tenant_slug in _DEMO_LOGINS:
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": email,
+                "password": "demo1234",
+                "tenant_slug": tenant_slug,
+            },
         )
-    return str(response.json()["access_token"])
+        if response.status_code == 200:
+            return str(response.json()["access_token"])
+        attempts.append(f"{email}@{tenant_slug} -> {response.status_code}")
+
+    pytest.skip(
+        "cannot log in as the seeded demo user ("
+        + "; ".join(attempts)
+        + "); run `python3 tools/seed_demo.py`"
+    )
 
 
 @pytest.fixture
 def auth_headers(access_token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {access_token}"}
+
+
+@pytest.fixture
+def viewer_headers(app, access_token: str) -> dict[str, str]:
+    """A bearer token for the same tenant and user, carrying the VIEWER role.
+
+    Minted directly from the app's own :class:`TokenService` rather than by
+    logging in as a second seeded user, for two reasons. The seed does not
+    create one, so a login-based fixture would skip everywhere and the masking
+    tests would quietly never run. And the property under test is a property of
+    the *permission set*, not of a particular row in ``users`` — deriving the
+    token from ``ROLE_GRANTS["viewer"]`` means it stays correct if the
+    role's grants are edited, which is exactly when a masking regression would
+    otherwise slip through.
+
+    The claims are otherwise identical to the owner's, so a test comparing the
+    two responses is isolating one variable: ``conversations:read_pii``.
+    """
+    from apps.api.security.permissions import ROLE_GRANTS
+
+    tokens = app.state.app_state.tokens
+    claims = tokens.verify_access(access_token)
+
+    viewer_token, _ = tokens.mint_access(
+        user_id=claims.sub,
+        tenant_id=claims.tid,
+        tenant_plan=claims.tsl,
+        roles=("viewer",),
+        permissions=frozenset(perm.value for perm in ROLE_GRANTS["viewer"]),
+        aal=claims.aal,
+    )
+    return {"Authorization": f"Bearer {viewer_token}"}
 
 
 @pytest_asyncio.fixture

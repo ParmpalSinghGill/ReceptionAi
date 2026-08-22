@@ -19,6 +19,9 @@
 export interface CursorPage<T> {
   items: T[];
   next_cursor: string | null;
+  /** Whether another page exists. Answered by fetching `limit + 1` rows
+   *  server-side, never by a COUNT over a partitioned table. */
+  has_more?: boolean;
 }
 
 export interface Money {
@@ -62,16 +65,22 @@ export interface TenantSummary {
 export type Channel = "voice_inbound" | "voice_outbound" | "web_chat" | "sms" | "whatsapp";
 
 export type ConversationOutcome =
+  /** The four the runtime writes to `conversations.outcome` (migration 0004). */
+  | "resolved"
   | "booked"
+  | "transferred"
+  | "abandoned"
+  /** Pre-0004 rows, where the API still derives an outcome it cannot store.
+   *  `answered` in particular is not a value the database knows. */
   | "rescheduled"
   | "cancelled"
   | "answered"
   | "message_taken"
-  | "transferred"
-  | "abandoned"
   | "failed";
 
-export type ConversationStatus = "active" | "completed" | "failed";
+/** The API's `conversation_status` enum. `completed` is the frontend's older
+ *  spelling of `ended`; both are accepted so a stored filter does not break. */
+export type ConversationStatus = "active" | "ended" | "completed" | "failed" | "abandoned";
 
 export interface Conversation {
   id: string;
@@ -94,6 +103,73 @@ export interface Conversation {
   sentiment: "positive" | "neutral" | "negative" | null;
 }
 
+/**
+ * One row of `GET /api/v1/conversations` — the wire shape, as the API sends it.
+ *
+ * Distinct from `Conversation` above, which is the richer shape the mock data
+ * and the detail screen use. The API cannot currently populate every field of
+ * that (there is no `outcomes` table yet, and no per-conversation summary
+ * text), and inventing values to fill the gap would put numbers on screen that
+ * nothing stands behind. `toConversation` in lib/query/hooks widens this into
+ * the UI shape, leaving the unknowable fields null.
+ *
+ * PII NOTE: `opening_line`, `contact_name` and `contact_identifier` are null
+ * for any principal without `conversations:read_pii`. That masking happens
+ * SERVER-SIDE — these are already null on the wire, not hidden at render time.
+ */
+export interface ConversationSummaryDto {
+  id: string;
+  channel: Channel;
+  status: ConversationStatus;
+  started_at: string;
+  ended_at: string | null;
+  last_activity_at: string | null;
+  duration_seconds: number | null;
+  turn_count: number;
+  outcome: ConversationOutcome | null;
+  escalated: boolean;
+  contained: boolean;
+  agent_code: string | null;
+  opening_line: string | null;
+  contact_identifier: string | null;
+  contact_name: string | null;
+}
+
+/** `GET /api/v1/conversations/{id}` — the transcript view's wire shape. */
+export interface ConversationDetailDto {
+  id: string;
+  channel: Channel;
+  status: ConversationStatus;
+  started_at: string;
+  ended_at: string | null;
+  turn_count: number;
+  agent_code: string | null;
+  agent_version: string | null;
+  escalated: boolean;
+  outcome: ConversationOutcome | null;
+  turns: TurnDto[];
+}
+
+/** One turn as the API sends it. `role` is the DB vocabulary
+ *  (`user`/`assistant`/…), which the UI maps to CALLER/DESK. */
+export interface TurnDto {
+  id: string;
+  sequence: number;
+  role: "user" | "assistant" | "system" | "tool" | "event";
+  /** Null or a redaction notice without `conversations:read_pii`. */
+  content: string | null;
+  /** Which agent in the graph handled this turn — makes multi-agent routing
+   *  visible, which is the point of showing it. */
+  agent_node: string | null;
+  created_at: string;
+  latency_ms: number | null;
+  finish_reason: string | null;
+  /** A reply the caller never heard: they were still talking when it was
+   *  ready, so the voice worker discarded it and answered the whole thought. */
+  interrupted?: boolean;
+  usage: { prompt_tokens: number; completion_tokens: number } | null;
+}
+
 export type TurnRole = "caller" | "desk" | "system";
 
 export interface ToolCall {
@@ -111,11 +187,15 @@ export interface Turn {
   id: string;
   role: TurnRole;
   content: string;
+  /** Which agent handled this turn, when the backend recorded one. */
+  agent_node?: string | null;
   started_at: string;
   /** Time from the end of the caller's turn to the first token of the reply. */
   latency_ms: number | null;
   tool_calls: ToolCall[];
   finish_reason: "stop" | "length" | "tool_calls" | "error" | null;
+  /** Generated but never spoken — the caller talked over it. */
+  interrupted?: boolean;
   usage: { prompt_tokens: number; completion_tokens: number } | null;
 }
 

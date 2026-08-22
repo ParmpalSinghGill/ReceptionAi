@@ -96,6 +96,7 @@ class ScriptedLLM:
         self._rounds = list(rounds)
         self._final = final
         self.chat_calls = 0
+        self.stream_calls = 0
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -114,9 +115,10 @@ class ScriptedLLM:
 
     async def chat(self, *, messages: Any, tools: Any = None, **kwargs: Any):
         self.chat_calls += 1
-        content, calls = (
-            self._rounds.pop(0) if self._rounds else ("Anything else?", [])
-        )
+        # Rounds exhausted: answer in prose, as a real model does once the
+        # tool results are in its history. The loop replays that prose as the
+        # reply (the fast path), so `final` must be what the prose says.
+        content, calls = self._rounds.pop(0) if self._rounds else (self._final, [])
         return ChatResult(
             message=Message(
                 role="assistant", content=content, tool_calls=tuple(calls)
@@ -129,6 +131,7 @@ class ScriptedLLM:
         )
 
     async def stream(self, *, messages: Any, tools: Any = None, **kwargs: Any):
+        self.stream_calls += 1
         # Word by word, so the guard's sentence buffering is genuinely
         # exercised. A single-chunk stream would let a broken guard pass.
         for word in self._final.split(" "):

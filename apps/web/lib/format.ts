@@ -101,6 +101,7 @@ export const CHANNEL_LABELS: Record<string, string> = {
 };
 
 export const OUTCOME_LABELS: Record<string, string> = {
+  resolved: "Resolved",
   booked: "Booked",
   rescheduled: "Rescheduled",
   cancelled: "Cancelled",

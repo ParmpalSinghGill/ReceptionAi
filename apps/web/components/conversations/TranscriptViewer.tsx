@@ -46,10 +46,36 @@ export function TranscriptViewer({ turns }: { turns: Turn[] }) {
                   {formatLatency(turn.latency_ms)}
                 </span>
               )}
+              {/* WHICH agent answered. The platform routes a conversation
+                  between specialists (triage, booking, billing), and without
+                  this the routing is invisible — a reply that came from the
+                  wrong specialist looks identical to one that came from the
+                  right one, which makes a routing bug almost impossible to see
+                  from a transcript. */}
+              {turn.agent_node && (
+                <span
+                  className="mt-1 block truncate font-mono text-[11px] text-fg-subtle"
+                  title={`Handled by ${turn.agent_node}`}
+                >
+                  {turn.agent_node}
+                </span>
+              )}
             </div>
 
             <div className="min-w-0 space-y-2">
-              <p className="text-fg">{turn.content}</p>
+              {/* A reply the caller never heard. Shown struck-through rather
+                  than hidden: it was generated and it cost tokens, and a
+                  reviewer asking "why did the desk say nothing for six
+                  seconds" deserves to see that it did say something — to
+                  nobody. */}
+              <p className={cn("text-fg", turn.interrupted && "text-fg-subtle line-through")}>
+                {turn.content}
+              </p>
+              {turn.interrupted && (
+                <p className="text-xs text-fg-subtle">
+                  Not heard — the caller was still speaking, so the desk answered their full message instead.
+                </p>
+              )}
 
               {turn.tool_calls.length > 0 && <ToolCalls calls={turn.tool_calls} />}
 

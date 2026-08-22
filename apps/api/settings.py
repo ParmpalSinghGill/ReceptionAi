@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     llm_provider: str = "deepseek"
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-flash"
     openai_api_key: str = ""
     #: Non-zero locally so the widget exercises incremental rendering against
     #: the stub exactly as it will against a real provider. Zero in tests.

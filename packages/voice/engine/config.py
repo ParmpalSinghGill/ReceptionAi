@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from packages.voice.turn import STOP_SECS_DEFAULT
+
 __all__ = ["TenantVoiceConfig", "TranscriptFidelity", "VoiceMode"]
 
 
@@ -78,7 +80,7 @@ class TenantVoiceConfig:
 
     #: End-of-turn silence, seconds. Clamped by
     #: :func:`packages.voice.turn.clamp_stop_secs` at the point of use.
-    stop_secs: float = 0.2
+    stop_secs: float = STOP_SECS_DEFAULT
 
     #: Spoken at the start of the call by the shell, not by the model.
     greeting: str | None = None

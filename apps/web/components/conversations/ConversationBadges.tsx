@@ -4,13 +4,18 @@ import {
   CalendarCheck,
   CalendarClock,
   Check,
+  CircleHelp,
   MessageSquareText,
   PhoneOff,
   TriangleAlert,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import type { BookingStatus, ConversationOutcome } from "@/lib/api/types";
+import type {
+  BookingStatus,
+  ConversationOutcome,
+  ConversationStatus,
+} from "@/lib/api/types";
 import { OUTCOME_LABELS } from "@/lib/format";
 
 /**
@@ -22,6 +27,7 @@ const OUTCOME_STYLE: Record<
   ConversationOutcome,
   { tone: "ok" | "warn" | "danger" | "info" | "neutral" | "accent"; icon: React.ReactNode }
 > = {
+  resolved: { tone: "ok", icon: <Check /> },
   booked: { tone: "ok", icon: <CalendarCheck /> },
   rescheduled: { tone: "info", icon: <CalendarClock /> },
   answered: { tone: "neutral", icon: <Check /> },
@@ -32,11 +38,40 @@ const OUTCOME_STYLE: Record<
   failed: { tone: "danger", icon: <TriangleAlert /> },
 };
 
-export function OutcomeBadge({ outcome }: { outcome: ConversationOutcome | null }) {
+/**
+ * A null outcome means two completely different things and used to render as
+ * one. A conversation that is STILL RUNNING has no outcome yet — "In progress"
+ * is right and the pulse dot belongs there. A conversation that ENDED without
+ * one is a row nothing can honestly classify: a pre-0004 record, or one the
+ * agent left before declaring anything. Labelling that "In progress" claimed a
+ * finished conversation was live, which is why every row on this screen read
+ * "In progress" while nothing at all was happening.
+ *
+ * `status` is what separates them, so it is required rather than optional — an
+ * optional prop here would silently default the wrong way at the one call site
+ * that forgot it.
+ */
+export function OutcomeBadge({
+  outcome,
+  status,
+}: {
+  outcome: ConversationOutcome | null;
+  status: ConversationStatus;
+}) {
   if (!outcome) {
+    if (status === "active") {
+      return (
+        <Badge tone="accent" icon={<span className="block size-1.5 rounded-pill bg-current" />}>
+          In progress
+        </Badge>
+      );
+    }
+    // Ended, and nothing recorded how. Saying so is better than picking a
+    // plausible word: DESIGN.md §7's rule is that a status never overstates
+    // what is known.
     return (
-      <Badge tone="accent" icon={<span className="block size-1.5 rounded-pill bg-current" />}>
-        In progress
+      <Badge tone="neutral" icon={<CircleHelp />}>
+        Unknown
       </Badge>
     );
   }

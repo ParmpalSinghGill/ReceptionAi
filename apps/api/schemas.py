@@ -224,6 +224,11 @@ class TurnDetail(BaseModel):
     created_at: str
     latency_ms: int | None = None
     finish_reason: str | None = None
+    #: A reply the caller never heard — they were still talking when it was
+    #: ready, so the voice worker discarded it unspoken and answered the
+    #: complete thought instead. Kept on record (it was generated and it
+    #: cost tokens); excluded from the model's history.
+    interrupted: bool = False
     #: Present only for a principal holding `usage:read` — 06 §3.2 keeps unit
     #: economics away from any other audience.
     usage: dict[str, Any] | None = None
@@ -243,6 +248,50 @@ class ConversationDetail(BaseModel):
     escalated: bool
     outcome: str | None = None
     turns: list[TurnDetail]
+
+
+class ConversationSummary(BaseModel):
+    """One row of ``GET /api/v1/conversations``.
+
+    Carries enough to render a readable list without a second request per row:
+    when it started, on what channel, how it went, how long it ran, and the
+    first thing the caller actually said. A list of ids and timestamps is not a
+    list a receptionist can scan.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    channel: str
+    status: str
+    started_at: str
+    ended_at: str | None = None
+    #: When anything last happened. Distinct from ``ended_at``, which is null
+    #: for the whole life of an open conversation — so a list sorted or labelled
+    #: by ``ended_at`` shows nothing for exactly the rows most worth looking at.
+    last_activity_at: str | None = None
+    duration_seconds: int | None = None
+    turn_count: int
+    #: Stored on ``conversations.outcome`` since migration 0004, written by the
+    #: terminal agent that ended the conversation. Null means genuinely unknown
+    #: — still running, or a pre-0004 row that could not be classified from a
+    #: record. See ``_outcome_of`` in the conversations router, which now only
+    #: derives for that historical case.
+    outcome: str | None = None
+    escalated: bool = False
+    #: Whether the assistant handled it without a person — the containment
+    #: metric, which is the inverse of ``escalated``.
+    contained: bool = True
+    agent_code: str | None = None
+    #: The caller's opening line. **PII**: null for a principal without
+    #: ``conversations:read_pii``, exactly as the customer's name and number are
+    #: on a booking.
+    opening_line: str | None = None
+    #: The caller's identifier, E.164 where the channel has one. **PII**, masked
+    #: on the same rule.
+    contact_identifier: str | None = None
+    #: **PII**, masked on the same rule.
+    contact_name: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

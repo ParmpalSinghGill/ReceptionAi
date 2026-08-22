@@ -32,12 +32,14 @@ ischema_names.setdefault("regconfig", REGCONFIG)
 
 __all__ = [
     "ConversationChannel",
+    "ConversationOutcome",
     "ConversationStatus",
     "OutcomeKind",
     "TenantStatus",
     "TurnRole",
     "UserStatus",
     "conversation_channel_enum",
+    "conversation_outcome_enum",
     "conversation_status_enum",
     "outcome_kind_enum",
     "tenant_status_enum",
@@ -98,6 +100,27 @@ class OutcomeKind(enum.StrEnum):
     SPAM = "spam"
 
 
+class ConversationOutcome(enum.StrEnum):
+    """The subset of :class:`OutcomeKind` the *runtime* can produce.
+
+    A terminal agent declares one of these in its manifest and the graph puts it
+    in state; nothing in the running system writes the other four. Those exist on
+    ``outcome_kind`` for 01 §6.5's post-hoc classifier, which does not exist yet
+    — and until it does, ``conversations.outcome`` is narrowed to this subset by
+    ``ck_conversations__outcome_writable`` so a fifth value cannot appear on the
+    dashboard without someone deciding what it means there.
+
+    Deliberately a separate type rather than an alias: the column's writable
+    domain and the type's full domain are different facts, and spelling them the
+    same would make the CHECK look redundant to the next person to read it.
+    """
+
+    RESOLVED = "resolved"
+    BOOKED = "booked"
+    TRANSFERRED = "transferred"
+    ABANDONED = "abandoned"
+
+
 def _pg_enum(python_enum: type[enum.StrEnum], name: str) -> ENUM:
     """Bind a Python StrEnum to its PostgreSQL type.
 
@@ -119,3 +142,15 @@ conversation_channel_enum = _pg_enum(ConversationChannel, "conversation_channel"
 conversation_status_enum = _pg_enum(ConversationStatus, "conversation_status")
 turn_role_enum = _pg_enum(TurnRole, "turn_role")
 outcome_kind_enum = _pg_enum(OutcomeKind, "outcome_kind")
+
+#: ``conversations.outcome``. Bound to the SAME PostgreSQL type as
+#: :data:`outcome_kind_enum` — there is one ``outcome_kind`` in the database —
+#: but to the narrower Python enum, so the ORM refuses a value the column's
+#: CHECK would reject anyway. Two guards on one fact, at the two layers that can
+#: each be reached without the other: an ORM write and a hand-written UPDATE.
+conversation_outcome_enum = ENUM(
+    ConversationOutcome,
+    name="outcome_kind",
+    create_type=False,
+    values_callable=lambda e: [member.value for member in e],
+)

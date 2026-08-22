@@ -71,7 +71,30 @@ def booking_row() -> str:
     return out.stdout.strip() or "(no row)"
 
 
+def _clear_previous_runs() -> int:
+    """Remove bookings this harness left behind on earlier runs.
+
+    Without this the harness poisons its own fixture. Every run books a slot,
+    and with `capacity_override = 1` the practice takes ONE appointment per half
+    hour — so after a handful of runs Tuesday morning is full of `Verify
+    Harness` rows and the agent correctly reports nothing free. The harness then
+    fails at step one and the transcript reads like a booking bug, which is how
+    an afternoon gets spent chasing a fixture problem.
+
+    Deletes only rows this file created, by customer name, so a booking made
+    through the widget or the seed is untouched.
+    """
+    out = subprocess.run(
+        ["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "postgres",
+         "-d", "receptionai", "-tAc",
+         f"DELETE FROM bookings WHERE customer_name = '{CUSTOMER}';"],
+        capture_output=True, text=True, timeout=60,
+    )
+    return 0 if out.returncode == 0 else 1
+
+
 def main() -> int:
+    _clear_previous_runs()
     try:
         session = json.load(_request("/api/v1/public/demo/sessions", method="POST"))
     except urllib.error.URLError as exc:

@@ -133,7 +133,13 @@ class VoiceAgentProcessor(FrameProcessor):
         run_turn: Calls the platform's ``GraphRunner`` and returns the reply
             text. Injected rather than constructed so this class stays a
             translator between Pipecat and the runtime, and so a test can drive
-            the whole pipeline without a model.
+            the whole pipeline without a model. Called with a ``speak_interim``
+            keyword: a coroutine that speaks a tool-round preamble immediately.
+        retract_last_reply: Called when a generated reply is discarded unspoken
+            because the caller kept talking. The runtime flags the persisted
+            reply so the follow-up turn's model does not see it — otherwise it
+            reads the continuation as an answer to a question the caller never
+            heard. Optional: without it the reply is merely not spoken.
         on_transcript: Notified for each user utterance and assistant reply, so
             the shell can stream a transcript to the browser.
         shared_state: Turn-phase flags shared with the turn strategies. The
@@ -144,12 +150,14 @@ class VoiceAgentProcessor(FrameProcessor):
     def __init__(
         self,
         *,
-        run_turn: Callable[[str], Awaitable[str]],
+        run_turn: Callable[..., Awaitable[str]],
+        retract_last_reply: Callable[[], Awaitable[None]] | None = None,
         on_transcript: Callable[[str, str], Awaitable[None]] | None = None,
         shared_state: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._run_turn = run_turn
+        self._retract_last_reply = retract_last_reply
         self._on_transcript = on_transcript
         self._state = shared_state if shared_state is not None else {}
         self._busy = False
@@ -194,26 +202,69 @@ class VoiceAgentProcessor(FrameProcessor):
 
     # ── the turn loop ─────────────────────────────────────────────────────
 
-    async def _run_one_turn(self, user_text: str, direction: FrameDirection) -> None:
+    async def _speak_preamble(self, text: str, direction: FrameDirection) -> None:
+        """Speak a tool-round preamble now, while the tool and reply are in flight.
+
+        "Let me check what we have today" said at ~1.5s is the difference
+        between a caller who waits and one who says "hello? are you there?"
+        into the silence — which then arrives as a second turn.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        log.info("voice.turn.preamble", chars=len(text))
+        await self._push_spoken_reply(text, direction)
+
+    async def _run_one_turn(self, user_text: str, direction: FrameDirection) -> str:
         self._last_user_text = user_text
         self._last_user_at = time.monotonic()
         self._state["last_user_text"] = user_text
         self._state["busy"] = True
 
+        async def speak_interim(text: str) -> None:
+            await self._speak_preamble(text, direction)
+
         log.info("voice.turn.started", text_len=len(user_text))
-        reply = (await self._run_turn(user_text) or "").strip()
+        reply = (
+            await self._run_turn(user_text, speak_interim=speak_interim) or ""
+        ).strip()
         if not reply:
             reply = _FALLBACK_REPLY
         log.info("voice.turn.replied", reply_len=len(reply))
-        await self._push_spoken_reply(reply, direction)
+        return reply
+
+    def _take_follow_up(self, current_text: str) -> str:
+        """Claim the queued continuation, unless it is an echo of this turn."""
+        pending = (self._pending_user_text or "").strip()
+        self._pending_user_text = ""
+        if not pending or pending == current_text:
+            return ""
+        if (
+            pending == self._last_user_text
+            and (time.monotonic() - self._last_user_at) < _DUPLICATE_WINDOW_S
+        ):
+            return ""
+        return pending
 
     async def _drain_turns(self, first_text: str, direction: FrameDirection) -> None:
-        """Background turn loop. Must not run on Pipecat's process-frame task."""
+        """Background turn loop. Must not run on Pipecat's process-frame task.
+
+        **Only the last round's reply is spoken.** A continuation queued while
+        a reply was being generated was spoken before that reply existed as
+        audio, so the caller has never heard it — it answers a thought the
+        conversation has already moved past. Speaking it and then answering the
+        continuation reads the same offer out twice in a row ("I can get you in
+        Friday at 10:30 — may I have your name?" … "Understood — I can get you
+        in Friday at 10:30 — may I have your name?"), because the follow-up
+        turn's model restates whatever the unheard reply established. Dropping
+        the unheard reply and speaking only the follow-up's answer gives the
+        caller one response to their complete thought.
+        """
         try:
             next_text = first_text
             while next_text:
                 try:
-                    await self._run_one_turn(next_text, direction)
+                    reply = await self._run_one_turn(next_text, direction)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -221,21 +272,34 @@ class VoiceAgentProcessor(FrameProcessor):
                     # indistinguishable from a dropped call. The exception text
                     # is logged, never spoken — it can carry PII.
                     log.exception("voice.turn.failed")
-                    try:
-                        await self._push_spoken_reply(_FALLBACK_REPLY, direction)
-                    except Exception:
-                        log.exception("voice.turn.error_reply_failed")
+                    reply = _FALLBACK_REPLY
 
-                pending = (self._pending_user_text or "").strip()
-                self._pending_user_text = ""
-                if not pending or pending == next_text:
-                    break
-                if (
-                    pending == self._last_user_text
-                    and (time.monotonic() - self._last_user_at) < _DUPLICATE_WINDOW_S
-                ):
-                    break
-                next_text = pending
+                if follow_up := self._take_follow_up(next_text):
+                    log.info(
+                        "voice.turn.reply_superseded",
+                        reply_len=len(reply),
+                        follow_up_len=len(follow_up),
+                    )
+                    # Before the follow-up runs, not after: the follow-up's
+                    # history is loaded at its start, and the unheard reply
+                    # must already be out of it by then.
+                    if self._retract_last_reply is not None:
+                        try:
+                            await self._retract_last_reply()
+                        except Exception:
+                            log.exception("voice.turn.retract_failed")
+                    next_text = follow_up
+                    continue
+
+                try:
+                    await self._push_spoken_reply(reply, direction)
+                except Exception:
+                    log.exception("voice.turn.error_reply_failed")
+
+                # An utterance that arrived while the reply frames were being
+                # queued was NOT superseded — the reply is on its way to the
+                # speaker — so it gets an ordinary turn of its own.
+                next_text = self._take_follow_up(next_text)
         finally:
             self._busy = False
             self._state["busy"] = False

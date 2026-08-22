@@ -373,10 +373,11 @@ class NodeFactory:
                 collected.get("_confirmed_tools") or ()
             )
 
-            # ── The tool rounds. Non-streaming, because a round that ends in
-            #    a tool call has no text worth showing and streaming one would
-            #    put a half-sentence on the caller's screen before it is
-            #    replaced by the real answer.
+            # ── The tool rounds. Non-streaming: a round that ends in a tool
+            #    call is mostly not text, and the text it does carry is vetted
+            #    and released as a PREAMBLE (see `_emit_preamble`) rather than
+            #    streamed raw — a half-vetted sentence cannot be recalled once
+            #    a token of it has left.
             for _round in range(_MAX_TOOL_ROUNDS):
                 if not grant_schemas or self._executor is None:
                     break
@@ -454,7 +455,14 @@ class NodeFactory:
                     # and a nudge naming what it said it would do. If it declines
                     # again, the loop exits normally and the guard below strips
                     # the false claim before anyone hears it.
-                    if _promises_action(result.message.content) and not nudged:
+                    if (
+                        _promises_action(
+                            result.message.content,
+                            backed=succeeded
+                            | set(collected.get("_completed_tools") or ()),
+                        )
+                        and not nudged
+                    ):
                         nudged = True
                         history.append(result.message)
                         history.append(
@@ -466,27 +474,30 @@ class NodeFactory:
                     #
                     # ── The fast path ────────────────────────────────────
                     #
-                    # If NO tool ran this turn, the text in hand is already the
-                    # answer: nothing happened after it was written that could
-                    # change it. Regenerating it costs a second full round trip
-                    # to the provider for a reply we are holding.
+                    # A round that answers in prose and calls no tool IS the
+                    # answer: it was written with every tool result so far in
+                    # its history, and nothing runs after it that could change
+                    # it. Regenerating it costs a second full round trip to the
+                    # provider for a reply we are holding.
                     #
                     # Measured on "hi": 1.56s to decide no tool was needed, then
                     # 0.95s to say "Hello! How can I help you today?" — 2.7s of
                     # silence for six words, and the second call produced
-                    # essentially what the first already had.
+                    # essentially what the first already had. Measured again
+                    # after a tool: the post-tool round said "I can get you in
+                    # with Dr Deshpande at 5:30 this afternoon… may I have your
+                    # name?" and the regenerating stream then said the same
+                    # sentence, 1.07s and a full prompt's tokens later.
                     #
-                    # Only when `tool_calls_made == 0`. Once a tool HAS run, the
-                    # prose from the deciding round predates the tool result and
-                    # replaying it would speak from stale information — the
-                    # class of bug that tells a caller their appointment moved
-                    # when the tool that would have moved it had not yet
-                    # returned. On that path the regenerating call stays.
-                    if (
-                        tool_calls_made == 0
-                        and not nudged
-                        and result.message.content
-                    ):
+                    # This used to be gated on `tool_calls_made == 0`, from a
+                    # worry that post-tool prose "predates the tool result". It
+                    # does not: prose that arrives WITH a tool call never reaches
+                    # this branch (the call runs instead), and prose from the
+                    # round AFTER a tool was generated from that tool's output.
+                    # The replay still goes through the claim guard with the
+                    # turn's `succeeded` set, so a claim is checked identically
+                    # on both paths.
+                    if not nudged and result.message.content:
                         # `not nudged` matters: once the model has been nudged
                         # for narrating without acting, the prose in hand is the
                         # narration itself — "I'll move it. One moment." —
@@ -497,6 +508,20 @@ class NodeFactory:
                     break
 
                 history.append(result.message)
+                # ── The preamble ──────────────────────────────────────
+                # "I'm sorry to hear you're in pain — let me check what
+                # emergency slots we have." written in the SAME round as the
+                # tool call. Before this it was discarded, and the caller sat
+                # in silence for the tool round-trip plus the whole final
+                # generation. Showing it now costs nothing (it is already
+                # generated) and moves the first visible response from ~4s to
+                # ~1.5s on a tool-calling turn.
+                if result.message.content:
+                    await self._emit_preamble(
+                        result.message.content,
+                        agent=agent,
+                        previously=set(collected.get("_completed_tools") or ()),
+                    )
                 outcomes = await self._run_tools(
                     calls=result.tool_calls,
                     agent=agent,
@@ -732,6 +757,44 @@ class NodeFactory:
         return run
 
     # ── Shared internals ──────────────────────────────────────────────────
+
+    async def _emit_preamble(
+        self, content: str, *, agent: AgentSpec, previously: set[str]
+    ) -> None:
+        """Release the prose a tool-calling round wrote, if it is safe to say now.
+
+        The text is pushed through a claim guard whose ``succeeded`` set is
+        EMPTY — because at this moment nothing has succeeded: the tool has not
+        run yet. So "I've booked that, one moment" is not shown (it is a claim
+        about a write that has not happened), while "Let me check the diary" is.
+        A preamble that would be rewritten is dropped outright rather than
+        replaced: the replacement sentence says nothing changed, which is the
+        wrong thing to say a second before the tool changes it.
+
+        Questions are dropped too: a round that asks "what time suits?" AND
+        calls a tool is narrating, and the final pass will ask properly — one
+        question per reply is a guard rule, and a preamble must not spend it.
+
+        Emitted as ordinary ``token`` deltas, flagged ``interim``, so a web
+        client renders it in place with no changes and the voice worker can
+        speak it the moment it arrives. The trailing space is the seam between
+        this and the final reply, which streams into the same message.
+        """
+        guard = _UnverifiedClaimGuard(set(), previously, None)
+        text = (guard.feed(content) + guard.flush()).strip()
+        if guard.tainted or guard.rewrote or guard.leaked_handle or not text:
+            log.info("graph.reply.preamble_withheld", agent=agent.key)
+            return
+        if "?" in text:
+            log.info("graph.reply.preamble_withheld", agent=agent.key, reason="question")
+            return
+        payload = text + " "
+        for i in range(0, len(payload), _REPLAY_CHUNK_CHARS):
+            await emit(
+                "token",
+                {"text": payload[i : i + _REPLAY_CHUNK_CHARS], "interim": True},
+            )
+        log.info("graph.reply.preamble", agent=agent.key, chars=len(text))
 
     async def _stream_reply(
         self,
@@ -1373,7 +1436,15 @@ _HUMAN_WILL_ACT: Final = re.compile(
     rf"(?:call|ring|contact|follow|be\s+with|get\s+back|pick|take|sort|"
     rf"confirm|help|assist|look)"
     rf"|\b(?:pass|passed|passing|transfer|transferred|transferring|connect|"
-    rf"connected|connecting|put|putting)\s+(?:you|your|this|that|it)\b"
+    rf"connected|connecting|put|putting)\s+"
+    # The object is not always the caller. "I've passed A MESSAGE to the team
+    # to cancel your appointment" is the same promise — a human will act — and
+    # it slipped through a pattern that only looked for "passed you". Observed
+    # in place of an actual `cancel_booking` call, so the caller believed their
+    # appointment was being cancelled by a person and the row stayed
+    # `confirmed`.
+    rf"(?:you|your|this|that|it|a\s+message|the\s+details|your\s+details|"
+    rf"a\s+note|the\s+request)\b"
     rf"|\bhave\s+(?:{_HUMAN_ACTOR})\s+\w+"
     rf"|\btake\s+a\s+message\b",
     re.IGNORECASE,
@@ -1755,6 +1826,11 @@ class _UnverifiedClaimGuard:
         #: never sees it.
         self.leaked_handle = False
 
+    @property
+    def tainted(self) -> bool:
+        """True once a claim has been suppressed and the reply discarded."""
+        return self._tainted
+
     def feed(self, chunk: str) -> str:
         """Absorb a delta; return the sentences that are safe to emit now.
 
@@ -1912,18 +1988,37 @@ class _UnverifiedClaimGuard:
         return True
 
 
-def _promises_action(content: str | None) -> bool:
+def _promises_action(
+    content: str | None, *, backed: set[str] | frozenset[str] = frozenset()
+) -> bool:
     """Did the model announce an action instead of performing one?
 
     Both halves are required: a bare "I'll check that for you" is a fine thing to
     say *alongside* a tool call, and this is only consulted when no call was
     made. A claim of completion counts too — a model asserting "that's moved"
     with no tool call is the same failure at a later stage.
+
+    ``backed`` is the set of tools that have already succeeded (this turn, or
+    earlier in the conversation). A completion claim those tools make true is a
+    *report*, not a promise: "that's booked for you" in the round after
+    ``book_appointment`` returned ok is the model doing its job. Without this,
+    every booking confirmation was nudged as if it were an empty promise — an
+    extra provider round trip, and then a regenerated reply on top, to say the
+    sentence it already had. The mapping from claim to required tool is the
+    guard's own (``_CLAIM_REQUIRES``), so the two cannot disagree about what
+    backs what; a claim the table does not know stays a promise.
     """
     if not content:
         return False
     probe = _normalise(content)
-    return bool(_INTENT_PROMISE.search(probe) or _COMPLETION_CLAIM.search(probe))
+    if _INTENT_PROMISE.search(probe):
+        return True
+    if not _COMPLETION_CLAIM.search(probe):
+        return False
+    required_sets = [req for pattern, req in _CLAIM_REQUIRES if pattern.search(probe)]
+    if required_sets and all(req & backed for req in required_sets):
+        return False
+    return True
 
 
 def _sum_usage(left: Usage | None, right: Usage | None) -> Usage | None:

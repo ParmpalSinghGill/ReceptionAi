@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["TurnPolicy", "clamp_stop_secs"]
+__all__ = ["STOP_SECS_DEFAULT", "TurnPolicy", "clamp_stop_secs"]
 
 #: Floor and ceiling for end-of-turn silence. Below 0.1s ordinary inter-word
 #: pauses end the turn and the caller is cut off mid-sentence; above 3s the
@@ -22,8 +22,24 @@ __all__ = ["TurnPolicy", "clamp_stop_secs"]
 _STOP_SECS_MIN = 0.1
 _STOP_SECS_MAX = 3.0
 
-#: Matches stock VAD. Long enough to survive a breath, short enough to answer.
-_STOP_SECS_DEFAULT = 0.2
+#: End-of-turn silence when nothing configures it.
+#:
+#: Was 0.2s — stock Silero — and that cut callers off mid-thought. A real call:
+#: "No, it can be a general check-up." *(pause under a second)* "No emergency."
+#: The 0.2s stop closed the turn inside that pause, so the first half went to
+#: the agent on its own and the second half arrived while the reply was being
+#: generated — two user turns on screen, then two near-identical replies read
+#: out back to back. 0.5s covers an ordinary mid-sentence pause while keeping
+#: the reply snappy; it costs ~0.3s of reply latency against 3–6s of inference.
+#: A pause longer than this still splits the utterance — and that case is
+#: handled downstream: the voice bridge discards the unheard reply, retracts
+#: it from history and answers the caller's complete thought as one message.
+#:
+#: Public rather than private because three layers (policy, voice config, the
+#: media worker's request model) must agree on it, and three literal copies of
+#: one number are how they stop agreeing.
+STOP_SECS_DEFAULT = 0.5
+_STOP_SECS_DEFAULT = STOP_SECS_DEFAULT
 
 
 def clamp_stop_secs(stop_secs: float | None) -> float:

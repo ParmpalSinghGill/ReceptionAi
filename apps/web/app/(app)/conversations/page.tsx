@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { PageHeader, PageShell } from "@/components/PageHeader";
 import { ContainedBadge, OutcomeBadge } from "@/components/conversations/ConversationBadges";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,7 +31,7 @@ export default function ConversationsPage() {
     contained: "all",
   });
   const conversations = useConversations(filters);
-  const rows = conversations.data ?? [];
+  const rows = conversations.rows;
 
   const set = (patch: Partial<ConversationFilters>) =>
     setFilters((f) => ({ ...f, ...patch }));
@@ -115,13 +116,31 @@ export default function ConversationsPage() {
         </CardContent>
       </Card>
 
-      {/* The result count is announced, so a filter change is perceivable
-          without sight (the table silently re-rendering is not). */}
+      {/* The count is announced, so a filter change is perceivable without
+          sight (the table silently re-rendering is not). It says "so far"
+          while more pages exist, because a bare "50 conversations" next to a
+          "Load more" button states something false. */}
       <p role="status" aria-live="polite" className="text-sm text-fg-muted">
         {conversations.isPending
           ? "Loading conversations…"
-          : `${rows.length} conversation${rows.length === 1 ? "" : "s"}`}
+          : conversations.hasNextPage
+            ? `${rows.length} conversation${rows.length === 1 ? "" : "s"} so far`
+            : `${rows.length} conversation${rows.length === 1 ? "" : "s"}`}
       </p>
+
+      {/* A genuine API failure is shown as one. Falling back to mock rows here
+          would be worse than an error: the reader cannot tell that what they
+          are looking at is not their data. */}
+      {conversations.isError && (
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-sm text-danger-fg">
+              Could not load conversations.{" "}
+              {conversations.error instanceof Error ? conversations.error.message : ""}
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       <TableWrap>
         <Table>
@@ -168,7 +187,7 @@ export default function ConversationsPage() {
                     <span className="line-clamp-2">{c.summary}</span>
                   </TD>
                   <TD>
-                    <OutcomeBadge outcome={c.outcome} />
+                    <OutcomeBadge outcome={c.outcome} status={c.status} />
                   </TD>
                   <TD>
                     <ContainedBadge contained={c.contained} />
@@ -185,6 +204,23 @@ export default function ConversationsPage() {
           </TBody>
         </Table>
       </TableWrap>
+
+      {/* Cursor pagination, surfaced as "Load more" rather than page numbers.
+          The API returns no total — a COUNT over a partitioned, append-heavy
+          table is the most expensive query it could run and is stale the
+          moment it returns — so "page 3 of 91" is not a thing it can honestly
+          render. */}
+      {conversations.hasNextPage && (
+        <div className="flex justify-center">
+          <Button
+            variant="secondary"
+            onClick={() => conversations.fetchNextPage()}
+            disabled={conversations.isFetchingNextPage}
+          >
+            {conversations.isFetchingNextPage ? "Loading…" : "Load more"}
+          </Button>
+        </div>
+      )}
     </PageShell>
   );
 }

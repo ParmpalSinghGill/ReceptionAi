@@ -13,7 +13,7 @@ from packages.voice.engine.config import (
     TranscriptFidelity,
     VoiceMode,
 )
-from packages.voice.turn import TurnPolicy, clamp_stop_secs
+from packages.voice.turn import STOP_SECS_DEFAULT, TurnPolicy, clamp_stop_secs
 
 
 class TestClampStopSecs:
@@ -25,7 +25,7 @@ class TestClampStopSecs:
             (0.0, 0.1),  # below the floor: would cut callers off mid-sentence
             (-3, 0.1),
             (99, 3.0),  # above the ceiling: the agent reads as broken
-            (None, 0.2),
+            (None, STOP_SECS_DEFAULT),
         ],
     )
     def test_clamps_into_the_workable_range(
@@ -35,7 +35,7 @@ class TestClampStopSecs:
 
     def test_junk_degrades_to_the_default(self) -> None:
         """This value can come from tenant config; a bad row must not kill a call."""
-        assert clamp_stop_secs("not a number") == 0.2  # type: ignore[arg-type]
+        assert clamp_stop_secs("not a number") == STOP_SECS_DEFAULT  # type: ignore[arg-type]
 
 
 class TestTurnPolicy:

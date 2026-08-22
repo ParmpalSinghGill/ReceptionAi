@@ -33,7 +33,10 @@ export default function DashboardPage() {
   const recent = useConversations({});
 
   const firstName = displayName.split(" ")[0];
-  const recentRows = (recent.data ?? []).slice(0, 8);
+  // `.rows` rather than `.data`: the list is cursor-paginated, so `data` is
+  // the InfiniteData envelope of pages. The dashboard wants the first handful
+  // of the newest page, which is exactly what the flattened rows give it.
+  const recentRows = recent.rows.slice(0, 8);
 
   return (
     <PageShell>
@@ -177,7 +180,7 @@ export default function DashboardPage() {
                         <span className="line-clamp-2">{c.summary}</span>
                       </TD>
                       <TD>
-                        <OutcomeBadge outcome={c.outcome} />
+                        <OutcomeBadge outcome={c.outcome} status={c.status} />
                       </TD>
                       <TD className="tabular text-right whitespace-nowrap">
                         {formatDuration(c.duration_seconds)}

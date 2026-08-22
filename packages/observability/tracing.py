@@ -209,11 +209,12 @@ def tool_call(tool_name: str, *, agent_key: str) -> Iterator[SpanHandle]:
 def record_tool_outcome(span: SpanHandle, record: dict[str, Any]) -> None:
     """Copy an executor audit record onto a tool span.
 
-    Only the fields 05 §D14.5 permits: a status, a duration, an error *class*.
-    ``redacted_args`` is deliberately not copied even though the executor has
-    already masked it — ``ai.tool.arguments`` is on the forbidden list outright,
-    and a partially-masked argument is still a natural-language string a person
-    said.
+    Only the fields 05 §D14.5 permits as ATTRIBUTES: a status, a duration, an
+    error *class*. ``redacted_args`` is deliberately not copied into an
+    attribute — ``ai.tool.arguments`` is on the forbidden list outright, and a
+    partially-masked argument is still a natural-language string a person
+    said. The executor records arguments and result as span *content* instead,
+    via ``set_content``, which is policy-gated and masked exactly like a prompt.
     """
     status = str(record.get("status", "ok"))
     span.set_attribute("ai.tool.status", status)

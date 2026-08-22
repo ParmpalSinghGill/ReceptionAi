@@ -15,6 +15,7 @@ here, and a second mechanism would be a second thing to get wrong.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -63,13 +64,19 @@ class VoiceSession:
     def transcript(self) -> list[tuple[str, str]]:
         return list(self._transcript)
 
-    async def _run_turn(self, user_text: str) -> str:
+    async def _run_turn(
+        self,
+        user_text: str,
+        *,
+        speak_interim: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
         """Bridge to the platform agent. Same graph, same tools, same rows."""
         try:
             reply = await self._runtime.run_turn(
                 tenant_id=self._params.tenant_id,
                 conversation_id=self._params.conversation_id,
                 user_text=user_text,
+                on_interim=speak_interim,
             )
         except asyncio.CancelledError:
             raise
@@ -82,6 +89,13 @@ class VoiceSession:
             return ""
         VOICE_TURNS.labels("ok" if reply else "empty").inc()
         return reply
+
+    async def _retract_last_reply(self) -> None:
+        """The bridge discarded an unspoken reply; keep the model's view honest."""
+        await self._runtime.retract_last_reply(
+            tenant_id=self._params.tenant_id,
+            conversation_id=self._params.conversation_id,
+        )
 
     async def _on_transcript(self, role: str, text: str) -> None:
         """Record a transcript line and push it to the browser.
@@ -123,6 +137,7 @@ class VoiceSession:
             transport,  # type: ignore[arg-type]
             cfg=self._params.cfg,
             run_turn=self._run_turn,
+            retract_last_reply=self._retract_last_reply,
             on_transcript=self._on_transcript,
             shared_state=self._state,  # type: ignore[arg-type]
         )

@@ -65,11 +65,14 @@ from apps.api.deps import (
     SESSION_HEADER,
     AppStateDep,
     ConversationAccessDep,
+    CurrentPrincipal,
+    ReadOnlyDbSession,
     requires,
 )
 from apps.api.problems import ProblemException
 from apps.api.schemas import (
     ConversationDetail,
+    ConversationSummary,
     MessageAccepted,
     MessageRequest,
     TurnDetail,
@@ -82,9 +85,23 @@ from apps.api.tickets import ConversationSession
 from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from packages.ai.runner import TurnEvent
+from packages.core.api.pagination import (
+    CursorError,
+    CursorPage,
+    decode_cursor,
+    page_from,
+)
 from packages.core.errors import EntityNotFoundError
 from packages.core.tenancy import TenantContext
-from packages.persistence.models.enums import TurnRole
+from packages.persistence.models.enums import (
+    ConversationChannel,
+    ConversationStatus,
+    TurnRole,
+)
+from packages.persistence.repositories.conversations import (
+    ConversationRepository,
+    ConversationRow,
+)
 
 __all__ = ["router"]
 
@@ -295,6 +312,268 @@ def _has_session(request: Request) -> bool:
     )
 
 
+#: Ceiling on the free-text search term. A pattern longer than this is not a
+#: search anyone typed, and an unbounded one is an ILIKE scan someone pasted.
+_MAX_SEARCH_LEN = 200
+
+#: The sort this list is served in, embedded in every cursor it issues. Newest
+#: first, because a receptionist opens this page to see what just happened —
+#: not to browse history from the beginning.
+_SORT = "started_at:desc"
+
+
+def _outcome_of(row: ConversationRow) -> str | None:
+    """How the conversation went — read, not guessed.
+
+    ``conversations.outcome`` (migration 0004) is now the answer, written by the
+    terminal agent that ended the conversation and by the idle sweeper that
+    closes the ones nobody said goodbye to. When it is set, it is returned
+    verbatim: the graph knew, and second-guessing a recorded value with a
+    derivation is how the two drift apart.
+
+    **The derivation below survives only for rows that predate the column.**
+    Migration 0004 backfilled what could be established from a record — an
+    escalated conversation was transferred, a conversation named by a booking
+    was booked — and deliberately left the rest null rather than inferring an
+    outcome from turn content. So this fallback exists for those unclassifiable
+    historical rows, and it is written to be obviously worse than the stored
+    value: it cannot distinguish ``booked`` from ``rescheduled``, and its
+    ``answered`` is not a word the database knows.
+
+    It returns ``None`` rather than a guess wherever the old code would have
+    invented one, because the UI now distinguishes the three cases the old
+    null-means-everything conflation could not: still running, ended with a
+    known outcome, and ended with an outcome nobody can honestly reconstruct.
+    """
+    conversation = row.conversation
+
+    # The recorded answer, whenever there is one.
+    if conversation.outcome is not None:
+        return str(conversation.outcome)
+
+    # ── Historical rows only, from here down ──────────────────────────────
+    if conversation.status == ConversationStatus.ACTIVE:
+        # Still running: it has no outcome yet, and inventing one would make a
+        # live call look finished.
+        return None
+    if conversation.escalated:
+        return "transferred"
+    if conversation.status == ConversationStatus.FAILED:
+        return "failed"
+    if conversation.status == ConversationStatus.ABANDONED:
+        return "abandoned"
+    # Ended before the column existed, with nothing recorded that says how. A
+    # conversation with turns was at least answered; one without never became a
+    # conversation at all. Beyond that this cannot honestly say, and does not
+    # try — the UI renders null as "unknown".
+    return "answered" if conversation.turn_count > 1 else "abandoned"
+
+
+def _to_summary(row: ConversationRow, *, unmask: bool) -> ConversationSummary:
+    """One repository row as the wire shape.
+
+    ``unmask`` is the viewer asymmetry from 05 §A2.3, applied exactly as
+    ``bookings.py`` applies it to ``customer_name``/``customer_phone``: a
+    principal without ``conversations:read_pii`` sees that a conversation
+    happened, on which channel, how long it ran and how it went — and sees
+    ``null`` where the caller's name, number and opening line would be.
+
+    **The masking is here, not in the frontend.** A field the UI declines to
+    render has already crossed the wire, is in the browser's memory, and is in
+    the response any curl or devtools Network tab can read. Hiding it client-
+    side is a suggestion; returning null is a control.
+    """
+    conversation = row.conversation
+
+    duration_seconds = (
+        conversation.duration_ms // 1000 if conversation.duration_ms is not None else None
+    )
+
+    return ConversationSummary(
+        id=conversation.id,
+        channel=str(conversation.channel),
+        status=str(conversation.status),
+        started_at=rfc3339(conversation.started_at) or "",
+        ended_at=rfc3339(conversation.ended_at),
+        last_activity_at=rfc3339(row.last_turn_at),
+        duration_seconds=duration_seconds,
+        turn_count=conversation.turn_count,
+        outcome=_outcome_of(row),
+        escalated=conversation.escalated,
+        # Containment is the inverse of escalation: the assistant "contained"
+        # the conversation when no person had to take it over.
+        contained=not conversation.escalated,
+        agent_code=conversation.agent_code,
+        opening_line=row.opening_line if unmask else None,
+        contact_identifier=conversation.contact_identifier if unmask else None,
+        contact_name=conversation.contact_name if unmask else None,
+    )
+
+
+@router.get(
+    "",
+    response_model=CursorPage[ConversationSummary],
+    dependencies=[Depends(requires(Perm.CONVERSATIONS_READ))],
+    summary="Conversations, newest first, cursor-paginated",
+)
+async def list_conversations(
+    principal: CurrentPrincipal,
+    session: ReadOnlyDbSession,
+    limit: int = Query(
+        default=50,
+        ge=1,
+        le=200,
+        description="Rows per page. The response carries `next_cursor` for the rest.",
+    ),
+    cursor: str | None = Query(
+        default=None,
+        max_length=512,
+        description=(
+            "Opaque cursor from a previous response's `next_cursor`. Offset "
+            "paging is not offered — these tables are partitioned by month."
+        ),
+    ),
+    channel: str | None = Query(
+        default=None,
+        description="Only this channel, e.g. `web_chat` or `voice_inbound`.",
+    ),
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description="Only this status: `active`, `ended`, `failed`, `abandoned`.",
+    ),
+    from_at: datetime | None = Query(
+        default=None,
+        alias="from",
+        description="Only conversations started at or after this instant (RFC 3339).",
+    ),
+    to_at: datetime | None = Query(
+        default=None,
+        alias="to",
+        description="Only conversations started strictly before this instant.",
+    ),
+    q: str | None = Query(
+        default=None,
+        max_length=_MAX_SEARCH_LEN,
+        description=(
+            "Free-text search over turn content. A conversation matches when "
+            "any of its turns does."
+        ),
+    ),
+) -> CursorPage[ConversationSummary]:
+    """The list the portal's `/conversations` page renders.
+
+    **The tenant is not a parameter.** It arrives in the bearer token's ``tid``
+    claim, through ``tenant_context`` into ``SET LOCAL app.tenant_id`` (contract
+    §10). There is no ``tenant_id`` to pass and none to forget, so a caller
+    cannot name another tenant's conversations — the vocabulary does not exist
+    on this route. A ``?tenant_id=`` in the query string is inert, which
+    ``tests/api/test_conversations_list.py`` asserts rather than assumes.
+
+    **Cursor, not offset.** ``conversations`` is partitioned by month on
+    ``created_at``. ``OFFSET 2000`` carries no predicate a partition can be
+    pruned by, so a deep page reads the tenant's entire history; and on a table
+    being appended to while it is read, an offset window shifts under the reader
+    and returns rows twice while skipping others. See
+    :meth:`ConversationRepository.page`.
+
+    **Newest first**, non-negotiable for this screen: the question it is opened
+    to answer is "what just happened", and a receptionist looking for the call
+    they took ninety seconds ago should not have to page to find it.
+    """
+    decoded = None
+    if cursor:
+        try:
+            decoded = decode_cursor(cursor, expect_sort=_SORT)
+        except CursorError as exc:
+            # 400 and not 500: a cursor comes from a query string, so it can be
+            # truncated by a mail client or replayed from a stale bookmark.
+            raise ProblemException(
+                status=400,
+                code="validation_failed",
+                detail=f"Invalid cursor: {exc}",
+            ) from exc
+
+    channel_filter = _parse_enum(
+        channel, ConversationChannel, field="channel"
+    )
+    status_value = _parse_enum(
+        status_filter, ConversationStatus, field="status"
+    )
+
+    if from_at is not None and to_at is not None and to_at < from_at:
+        raise ProblemException(
+            status=422,
+            code="validation_failed",
+            detail="`to` falls before `from`.",
+        )
+
+    search = q.strip() if q else None
+
+    repo = ConversationRepository(session)
+    page = await repo.page(
+        limit=limit,
+        cursor=decoded,
+        channel=channel_filter,
+        status=status_value,
+        started_from=_as_utc(from_at),
+        started_to=_as_utc(to_at),
+        search=search or None,
+    )
+
+    unmask = Perm.CONVERSATIONS_READ_PII.value in principal.permissions
+
+    # `page_from` trims the sentinel row the repository fetched and turns it
+    # into `has_more` + `next_cursor`. The cursor key must be the SAME pair the
+    # query ordered by, or the next page silently starts in the wrong place.
+    summaries = page_from(
+        page.rows,
+        limit,
+        sort=_SORT,
+        key=lambda row: (row.conversation.started_at, row.conversation.id),
+    )
+
+    return CursorPage[ConversationSummary](
+        items=[_to_summary(row, unmask=unmask) for row in summaries.items],
+        next_cursor=summaries.next_cursor,
+        has_more=summaries.has_more,
+    )
+
+
+def _parse_enum(value: str | None, enum_type, *, field: str):
+    """A filter value as its enum member, or a 422 naming the alternatives.
+
+    FastAPI would give a 422 for an enum-typed parameter on its own, but the
+    body would not be an RFC 9457 problem document, and the detail would not
+    list what the caller could have said instead.
+    """
+    if value is None:
+        return None
+    try:
+        return enum_type(value)
+    except ValueError as exc:
+        allowed = ", ".join(member.value for member in enum_type)
+        raise ProblemException(
+            status=422,
+            code="validation_failed",
+            detail=f"Unknown `{field}` {value!r}. Expected one of: {allowed}.",
+        ) from exc
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """A filter bound in UTC.
+
+    A caller may send ``2026-08-20T00:00:00`` with no offset. Comparing a naive
+    datetime against a ``timestamptz`` column raises in the driver, so a missing
+    offset is read as UTC rather than being allowed to 500.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 @router.get(
     "/{conversation_id}",
     response_model=ConversationDetail,
@@ -349,6 +628,7 @@ async def get_conversation(
                 created_at=rfc3339(turn.created_at) or "",
                 latency_ms=turn.latency_ms,
                 finish_reason=turn.finish_reason,
+                interrupted=bool(turn.is_interruption),
                 usage=(
                     {
                         "prompt_tokens": turn.input_tokens,

@@ -258,6 +258,17 @@ class ToolExecutor:
                 call, grants, agent, context, confirmed
             )
             record_tool_outcome(span, outcome.record)
+            # What went in and what came back — as span CONTENT, never as
+            # attributes (05 §D14.5 forbids `ai.tool.arguments` as an
+            # attribute, for the same reason it forbids `gen_ai.prompt`).
+            # Content goes through the adapter's `set_content`, which applies
+            # the tenant's capture policy and the SDK mask — identical to how
+            # a prompt reaches the trace. The arguments are the executor's
+            # already-PII-redacted copy; the output is the model-facing text.
+            span.set_content(
+                input=outcome.record.get("redacted_args"),
+                output=outcome.message.content,
+            )
             return outcome
 
     async def _execute_one_traced(

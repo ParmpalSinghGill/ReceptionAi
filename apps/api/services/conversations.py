@@ -41,7 +41,12 @@ from packages.core.ports.llm import LLMPort, Message
 from packages.core.ports.tracing import TracingPolicy
 from packages.core.tenancy import TenantContext
 from packages.persistence.models.conversations import Conversation
-from packages.persistence.models.enums import ConversationChannel, TurnRole
+from packages.persistence.models.enums import (
+    ConversationChannel,
+    ConversationOutcome,
+    ConversationStatus,
+    TurnRole,
+)
 from packages.persistence.repositories.conversations import (
     ConversationRepository,
     TurnRepository,
@@ -151,6 +156,48 @@ class ConversationService:
             )
         return uuid7()
 
+    async def retract_last_reply(
+        self, *, ctx: TenantContext, conversation_id: UUID
+    ) -> bool:
+        """The newest reply was generated but never delivered; take it back.
+
+        Voice only, in practice: the caller kept talking while the reply was
+        being generated, so the bridge discarded it unspoken and is about to
+        run the follow-up. Left in place, the next turn's history would end
+        ``assistant: "…may I have your name?"`` / ``user: "no emergency"`` and
+        the model would read the continuation as an answer to a question the
+        caller never heard. Flagging the row as interrupted keeps the record
+        and removes it from what the model sees; see
+        :meth:`TurnRepository.retract_latest_reply` for the guard on *which*
+        row may be retracted.
+
+        Never raises. Returns whether anything was retracted.
+        """
+        try:
+            async with self._sessions.unit_of_work(ctx) as session:
+                conversation = await self._require_conversation(
+                    session, conversation_id
+                )
+                turn = await TurnRepository(session).retract_latest_reply(
+                    conversation=conversation
+                )
+        except Exception:
+            log.exception(
+                "conversation.retract_failed",
+                tenant_id=str(ctx.tenant_id),
+                conversation_id=str(conversation_id),
+            )
+            return False
+        if turn is None:
+            return False
+        log.info(
+            "conversation.reply_retracted",
+            tenant_id=str(ctx.tenant_id),
+            conversation_id=str(conversation_id),
+            turn_id=str(turn.id),
+        )
+        return True
+
     async def stream_turn(
         self,
         *,
@@ -178,6 +225,21 @@ class ConversationService:
             history = await self._load_history(
                 session, conversation_id, drop_trailing_user=user_text
             )
+            # History ending on a *user* message means the previous utterance
+            # was never answered — its reply was retracted (voice: the caller
+            # kept talking before it could be spoken), or never persisted. The
+            # two utterances are one thought split in two, so they go to the
+            # model as one message: "No, a general check-up. No emergency."
+            # Sent as two consecutive user messages the model tends to answer
+            # the last one alone; merged, it answers what was actually said.
+            # Persistence is untouched — both rows are already on record.
+            if history and history[-1].role == "user":
+                prior = history.pop()
+                user_text = f"{prior.content.strip()} {user_text.strip()}".strip()
+                log.info(
+                    "conversation.turn_combined",
+                    conversation_id=str(conversation_id),
+                )
             manifest = await ManifestInstallService(session).load()
             collected = await self._load_collected_data(session, conversation_id)
             timezone = await self._business_timezone(session)
@@ -232,13 +294,93 @@ class ConversationService:
     async def _finalize(
         self, *, ctx: TenantContext, conversation_id: UUID, result: TurnResult
     ) -> None:
-        """Both post-turn writes, as one shieldable unit."""
+        """Every post-turn write, as one shieldable unit.
+
+        Order matters only in that the turn is written first: if the process
+        dies between these, a conversation with its last turn but no outcome is
+        recoverable (the idle sweeper will close it), whereas an outcome on a
+        conversation missing the turn that produced it is a row that contradicts
+        its own transcript.
+        """
         await self._persist_assistant_turn(
             ctx=ctx, conversation_id=conversation_id, result=result
         )
         await self._persist_collected_data(
             ctx=ctx, conversation_id=conversation_id, result=result
         )
+        await self._persist_outcome(
+            ctx=ctx, conversation_id=conversation_id, result=result
+        )
+
+    async def _persist_outcome(
+        self, *, ctx: TenantContext, conversation_id: UUID, result: TurnResult
+    ) -> None:
+        """Record the outcome the graph declared, and close if it was terminal.
+
+        **The value has existed all along and was simply dropped.** A terminal
+        agent declares ``outcome`` in the manifest, ``NodeFactory.terminal``
+        puts it in graph state, and ``GraphRunner`` copies it to
+        ``TurnResult.outcome`` on every turn — the runner even puts it on the
+        trace span. Nothing wrote it to the row, so ``/conversations`` derived a
+        weaker answer from ``status`` while the real one went past it each turn.
+
+        **A declared outcome means the conversation is over**, which is why this
+        also closes it. That is not an inference: ``routing.route`` sends a run
+        with a non-null outcome straight to ``END``, and only a ``TERMINAL``
+        node may declare one (``VerticalManifest`` rejects a non-terminal agent
+        that tries). The agent has said goodbye; leaving the row ``active`` so a
+        sweeper can notice in half an hour would report "in progress" for a
+        conversation that demonstrably finished.
+
+        Never raises, for the same reason the other two post-turn writes do not:
+        this runs inside the shielded ``finally``, including on the disconnect
+        path, and an exception here would replace the real failure with a
+        bookkeeping one.
+        """
+        if not result.outcome:
+            return
+
+        try:
+            outcome = ConversationOutcome(result.outcome)
+        except ValueError:
+            # A manifest declaring something outside the writable vocabulary
+            # would be rejected at load time, so this is a "cannot happen" —
+            # logged rather than raised because losing the turn over it would
+            # be a worse outcome than losing the classification.
+            log.warning(
+                "conversation.outcome_unknown",
+                outcome=result.outcome,
+                conversation_id=str(conversation_id),
+            )
+            return
+
+        try:
+            async with self._sessions.unit_of_work(ctx) as session:
+                repository = ConversationRepository(session)
+                conversation = await repository.get(conversation_id)
+                if conversation is None:
+                    return
+
+                await repository.record_outcome(conversation_id, outcome=outcome)
+
+                # Idempotent: a conversation already closed is left alone rather
+                # than having its `ended_at` pushed forward. Re-closing would
+                # stretch `duration_ms` every time a late turn arrived.
+                if conversation.status == ConversationStatus.ACTIVE:
+                    await repository.end(conversation_id)
+        except Exception:
+            log.exception(
+                "conversation.outcome_persist_failed",
+                tenant_id=str(ctx.tenant_id),
+                conversation_id=str(conversation_id),
+            )
+        else:
+            log.info(
+                "conversation.ended",
+                tenant_id=str(ctx.tenant_id),
+                conversation_id=str(conversation_id),
+                outcome=outcome.value,
+            )
 
     async def _persist_assistant_turn(
         self, *, ctx: TenantContext, conversation_id: UUID, result: TurnResult
@@ -490,8 +632,30 @@ class ConversationService:
         messages: list[Message] = []
         for turn in turns:
             if turn.role == TurnRole.USER and turn.content:
+                if messages and messages[-1].role == "user":
+                    # Two caller utterances with no reply between them are
+                    # one thought that arrived in two pieces (the reply to
+                    # the first was retracted, or never written). The turn
+                    # that answered them saw them as ONE message — see
+                    # `stream_turn` — so every later turn must too, or the
+                    # conversation reads differently depending on when it is
+                    # loaded.
+                    prior = messages.pop()
+                    messages.append(
+                        Message(
+                            role="user",
+                            content=f"{prior.content.strip()} {turn.content.strip()}",
+                        )
+                    )
+                    continue
                 messages.append(Message(role="user", content=turn.content))
             elif turn.role == TurnRole.ASSISTANT and turn.content:
+                if turn.is_interruption:
+                    # Generated, never delivered: the caller was still
+                    # talking and the reply was retracted before it was
+                    # spoken. The model must not treat what follows as an
+                    # answer to it. See `retract_last_reply`.
+                    continue
                 messages.append(Message(role="assistant", content=turn.content))
         return messages
 

@@ -95,7 +95,7 @@ export default function ConversationDetailPage({
         }
         actions={
           <>
-            <OutcomeBadge outcome={c.outcome} />
+            <OutcomeBadge outcome={c.outcome} status={c.status} />
             <ContainedBadge contained={c.contained} />
           </>
         }

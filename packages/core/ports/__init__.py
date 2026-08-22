@@ -23,6 +23,7 @@ from packages.core.ports.connection_router import (
     ConnectionRouterPort,
     UnresolvableShardError,
 )
+from packages.core.ports.conversation_state import ConversationStatePort
 from packages.core.ports.llm import (
     ChatResult,
     LLMPort,
@@ -50,6 +51,7 @@ __all__ = [
     "Capture",
     "ChatResult",
     "ConnectionRouterPort",
+    "ConversationStatePort",
     "GenerationUsage",
     "LLMPort",
     "Message",

@@ -19,6 +19,7 @@ from packages.persistence.models.base import (
 from packages.persistence.models.conversations import Conversation, Turn
 from packages.persistence.models.enums import (
     ConversationChannel,
+    ConversationOutcome,
     ConversationStatus,
     OutcomeKind,
     TenantStatus,
@@ -39,6 +40,7 @@ __all__ = [
     "Base",
     "Conversation",
     "ConversationChannel",
+    "ConversationOutcome",
     "ConversationStatus",
     "Location",
     "OutcomeKind",

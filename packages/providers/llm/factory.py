@@ -123,7 +123,7 @@ def _build_deepseek(
 ) -> OpenAICompatibleLLMAdapter:
     return DeepSeekLLMAdapter(
         api_key=key,
-        model=settings.model or "deepseek-chat",
+        model=settings.model or "deepseek-v4-flash",
         base_url=settings.base_url or "https://api.deepseek.com/v1",
     )
 

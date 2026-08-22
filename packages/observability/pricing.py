@@ -41,6 +41,13 @@ class _Rate:
 #: ``deepseek-chat`` also matches a dated variant like
 #: ``deepseek-chat-2026-01-01`` without a table edit.
 _RATES: Final[dict[str, _Rate]] = {
+    # V4 checked 2026-08-22. DeepSeek prices V4 on a peak/off-peak split and
+    # this table holds one rate per model, so these are the PEAK numbers:
+    # off-peak is half, and an estimate that quietly assumed the cheaper half
+    # would under-report every daytime conversation. Real spend is at or below
+    # what a trace shows, never above.
+    "deepseek-v4-flash": _Rate(input_=0.44, output=1.32, cached_input=0.014),
+    "deepseek-v4-pro": _Rate(input_=1.32, output=3.96, cached_input=0.044),
     "deepseek-reasoner": _Rate(input_=0.55, output=2.19, cached_input=0.07),
     "deepseek-chat": _Rate(input_=0.27, output=1.10, cached_input=0.07),
     "gpt-4o-mini": _Rate(input_=0.15, output=0.60, cached_input=0.075),

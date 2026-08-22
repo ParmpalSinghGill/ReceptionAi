@@ -22,9 +22,11 @@ from typing import Any
 from packages.persistence.models.base import Base
 from packages.persistence.models.enums import (
     ConversationChannel,
+    ConversationOutcome,
     ConversationStatus,
     TurnRole,
     conversation_channel_enum,
+    conversation_outcome_enum,
     conversation_status_enum,
     turn_role_enum,
 )
@@ -138,6 +140,21 @@ class Conversation(Base):
     )
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── How it went ───────────────────────────────────────────────────────
+    # Contract §7's `Outcome`, as the terminal agent that ended the conversation
+    # declared it. NULLABLE and that is the honest representation: an
+    # in-progress conversation has no outcome, and neither does a row that
+    # predates this column and could not be classified after the fact. The
+    # dashboard renders null as "unknown" rather than picking a plausible word.
+    #
+    # Typed to `ConversationOutcome` (four values) while the PostgreSQL type is
+    # `outcome_kind` (eight). `ck_conversations__outcome_writable` holds the
+    # narrowing at the storage layer; see the enum's docstring for why the extra
+    # four are not writable yet.
+    outcome: Mapped[ConversationOutcome | None] = mapped_column(
+        conversation_outcome_enum, nullable=True
+    )
+
     # ── Aggregates, maintained incrementally ──────────────────────────────
     # Rolled up here so the conversation list view needs no aggregate over
     # `turns`, which is a partitioned, 100M-row table.
@@ -207,6 +224,11 @@ class Conversation(Base):
             "escalated = (escalated_at IS NOT NULL)",
             name="escalation_coherent",
         ),
+        CheckConstraint(
+            "outcome IS NULL OR outcome::TEXT IN "
+            "('resolved', 'booked', 'transferred', 'abandoned')",
+            name="outcome_writable",
+        ),
         CheckConstraint("total_cost >= 0", name="cost_nonneg"),
         # Indexes are declared on the parent; PostgreSQL creates them on every
         # partition, existing and future.
@@ -216,6 +238,16 @@ class Conversation(Base):
             "tenant_id",
             "channel",
             text("started_at DESC"),
+        ),
+        # The list view's outcome filter. Partial on NOT NULL: the null rows are
+        # the ones nobody filters *for*, and an entry per unclassified row would
+        # be most of the table for no query.
+        Index(
+            "ix_conversations__tenant_outcome",
+            "tenant_id",
+            "outcome",
+            text("started_at DESC"),
+            postgresql_where=text("outcome IS NOT NULL"),
         ),
         Index(
             "ix_conversations__tenant_status",

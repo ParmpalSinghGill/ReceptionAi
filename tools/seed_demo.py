@@ -591,10 +591,10 @@ _SERVICES: tuple[dict[str, Any], ...] = (
         "category": "diagnostic",
         "duration_minutes": 25,
         "buffer_after_minutes": 5,
-        "price": "45.0000",
+        "price": "800.0000",
         "lead_time_minutes": 120,
         "cancellation_window_minutes": 1440,
-        "cancellation_fee": "25.0000",
+        "cancellation_fee": "300.0000",
         "sort_order": 1,
         "intake_schema": [
             {
@@ -632,10 +632,10 @@ _SERVICES: tuple[dict[str, Any], ...] = (
         "category": "diagnostic",
         "duration_minutes": 25,
         "buffer_after_minutes": 5,
-        "price": "35.0000",
+        "price": "500.0000",
         "lead_time_minutes": 60,
         "cancellation_window_minutes": 1440,
-        "cancellation_fee": "25.0000",
+        "cancellation_fee": "300.0000",
         "sort_order": 2,
         "intake_schema": [],
         "requirements": (
@@ -661,10 +661,10 @@ _SERVICES: tuple[dict[str, Any], ...] = (
         "category": "preventive",
         "duration_minutes": 25,
         "buffer_after_minutes": 5,
-        "price": "68.0000",
+        "price": "1500.0000",
         "lead_time_minutes": 60,
         "cancellation_window_minutes": 1440,
-        "cancellation_fee": "25.0000",
+        "cancellation_fee": "300.0000",
         "sort_order": 3,
         "intake_schema": [],
         "requirements": (
@@ -691,7 +691,7 @@ _SERVICES: tuple[dict[str, Any], ...] = (
         "category": "urgent",
         "duration_minutes": 25,
         "buffer_after_minutes": 5,
-        "price": "75.0000",
+        "price": "1200.0000",
         # Bookable right now: someone in acute pain must not be told the
         # earliest slot is in two hours because of a lead-time rule written for
         # routine care.

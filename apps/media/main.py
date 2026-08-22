@@ -32,6 +32,7 @@ from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from packages.voice.engine.config import TenantVoiceConfig
+from packages.voice.turn import STOP_SECS_DEFAULT
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
@@ -54,7 +55,7 @@ class OfferRequest(BaseModel):
     #: Present on a renegotiation; identifies the existing peer connection.
     pc_id: str | None = None
     conversation_id: str | None = None
-    stop_secs: float = Field(default=0.2, ge=0.1, le=3.0)
+    stop_secs: float = Field(default=STOP_SECS_DEFAULT, ge=0.1, le=3.0)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -181,6 +182,14 @@ async def _handle_offer(
     @connection.event_handler("closed")
     async def _on_closed(conn: Any) -> None:
         connections.pop(conn.pc_id, None)
+        # The hangup. Voice is the one channel that has a definite end, so the
+        # conversation row is closed here rather than waiting for the 30-minute
+        # idle sweeper to infer it. `close_conversation` is idempotent and never
+        # raises: a call that reached `wrap_up` was already closed with the
+        # outcome that agent declared, and this must not disturb it.
+        await runtime.close_conversation(
+            tenant_id=tenant_id, conversation_id=conversation_id
+        )
         log.info("media.session.closed", pc_id=conn.pc_id)
 
     await _start_pipeline(session, connection, state)

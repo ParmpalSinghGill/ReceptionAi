@@ -144,7 +144,8 @@ def build_composed_pipeline(
     transport: BaseTransport,
     *,
     cfg: TenantVoiceConfig,
-    run_turn: Callable[[str], Awaitable[str]],
+    run_turn: Callable[..., Awaitable[str]],
+    retract_last_reply: Callable[[], Awaitable[None]] | None = None,
     on_transcript: Callable[[str, str], Awaitable[None]] | None = None,
     shared_state: dict[str, Any] | None = None,
     api_key: str | None = None,
@@ -161,7 +162,10 @@ def build_composed_pipeline(
     stt = build_stt(cfg, api_key=api_key)
     tts = build_tts(cfg, api_key=api_key)
     agent = VoiceAgentProcessor(
-        run_turn=run_turn, on_transcript=on_transcript, shared_state=state
+        run_turn=run_turn,
+        retract_last_reply=retract_last_reply,
+        on_transcript=on_transcript,
+        shared_state=state,
     )
 
     params = vad_params(policy)
