@@ -3,9 +3,14 @@
 Multi-tenant AI receptionist platform — voice and chat agents that answer calls,
 book appointments, and integrate with a tenant's existing systems.
 
-**Status: Phase 1 — walking skeleton, working end to end.** A real tenant holds
-a real streaming conversation with a manifest-defined agent, isolated by RLS.
-Voice, bookings, and knowledge ingestion are not built yet — see
+**▶ [Watch the demo video](https://youtu.be/GxYUHvRKpN8)** — a caller books an
+appointment by voice and it lands in the practice's diary seconds later.
+
+**Status: working end to end.** A real tenant holds a real streaming
+conversation with a manifest-defined agent, isolated by RLS. Voice calls
+(browser WebRTC → Deepgram STT/TTS) and the full booking engine (book,
+reschedule, cancel, emergency triage) are live; knowledge ingestion and a
+second vertical are not built yet — see
 [the roadmap](docs/architecture/07-ROADMAP.md).
 
 ---
