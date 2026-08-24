@@ -109,6 +109,35 @@ def _text(value: Any, limit: int | None) -> str:
     return out
 
 
+def _attempts(obs: dict) -> list[str]:
+    """Per-attempt lines from the span's `llm.attempt.*` metadata.
+
+    A span covers the adapter's whole call including its retries, so this is
+    what separates "one slow answer" from "three requests and two backoffs".
+    """
+    md = obs.get("metadata")
+    if not isinstance(md, dict):
+        return []
+    n = md.get("llm.attempt_count")
+    if not isinstance(n, int) or n < 1:
+        return []
+    out = []
+    for i in range(n):
+        dur = md.get(f"llm.attempt.{i}.duration_ms")
+        status = md.get(f"llm.attempt.{i}.status")
+        err = md.get(f"llm.attempt.{i}.error")
+        back = md.get(f"llm.attempt.{i}.backoff_ms")
+        bits = [f"attempt {i}: {(dur or 0)/1000:.2f}s"]
+        if status is not None:
+            bits.append(f"HTTP {status}")
+        if err:
+            bits.append(f"FAILED {err}")
+        if back:
+            bits.append(f"then slept {back/1000:.2f}s")
+        out.append("  ".join(bits))
+    return out
+
+
 def _usage(obs: dict) -> str:
     u = obs.get("usage") or obs.get("usageDetails") or {}
     if not isinstance(u, dict):
@@ -153,6 +182,10 @@ def report(trace_id: str, *, content: bool, width: int | None) -> None:
         offset = (start - root_start).total_seconds() if start and root_start else 0.0
         gap = (start - prev_end).total_seconds() if start and prev_end else 0.0
         flag = " <-- NUDGE" if NUDGE_MARK in json.dumps(o.get("input") or "") else ""
+        md = o.get("metadata") if isinstance(o.get("metadata"), dict) else {}
+        n_att = md.get("llm.attempt_count")
+        if isinstance(n_att, int) and n_att > 1:
+            flag += f"  [{n_att} HTTP attempts - RETRIED]"
         print(
             f"{i:>2}  {o.get('type',''):<11}{str(o.get('name'))[:33]:<34}"
             f"{offset:>7.2f}s{dur:>8.2f}s{gap:>7.2f}s{flag}"
@@ -171,6 +204,31 @@ def report(trace_id: str, *, content: bool, width: int | None) -> None:
     print(f"    unaccounted   {total-accounted:>7.2f}s  <- platform, queueing, gaps")
     print(f"    after last span {tail:>5.2f}s")
 
+    retried = [
+        o for o in spans
+        if isinstance(o.get("metadata"), dict)
+        and isinstance(o["metadata"].get("llm.attempt_count"), int)
+        and o["metadata"]["llm.attempt_count"] > 1
+    ]
+    if retried:
+        print(f"\n  RETRIES: {len(retried)} span(s) made more than one HTTP request.")
+        for o in retried:
+            for line in _attempts(o):
+                print(f"    {o.get('name')}  {line}")
+        print("  A span's duration includes every attempt AND the sleeps between.")
+    else:
+        any_rec = any(
+            isinstance(o.get("metadata"), dict)
+            and o["metadata"].get("llm.attempt_count")
+            for o in spans
+        )
+        if any_rec:
+            print("\n  No retries: every span was a single HTTP request, so its")
+            print("  duration is the provider's own answer time.")
+        else:
+            print("\n  (no llm.attempt_* metadata - this turn predates attempt")
+            print("   recording, so a slow span cannot be split into attempts)")
+
     if not content:
         print("\n(run with --content for the full prompts and replies)")
         return
@@ -185,6 +243,8 @@ def report(trace_id: str, *, content: bool, width: int | None) -> None:
         )
         if u := _usage(o):
             print(f"  usage: {u}")
+        for line in _attempts(o):
+            print(f"  {line}")
         raw = json.dumps(o.get("input") or "")
         print(f"  prompt chars: {len(raw)}")
         if NUDGE_MARK in raw:

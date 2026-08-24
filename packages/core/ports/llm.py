@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
 __all__ = [
+    "Attempt",
     "ChatResult",
     "FinishReason",
     "LLMPort",
@@ -74,6 +75,32 @@ class Usage:
 
 
 @dataclass(frozen=True, slots=True)
+class Attempt:
+    """One HTTP request inside a single logical model call.
+
+    A retrying adapter makes several of these before returning, and the trace
+    span covers all of them — so a span reading "23.25s, one call" may be three
+    requests and two backoff sleeps. Without this record that is indistinguish-
+    able from one genuinely slow answer, and the two have opposite fixes.
+
+    ``status`` is the HTTP status where there was a response, ``None`` where the
+    request never got one (timeout, connection reset). ``error`` is the
+    exception type or a short reason — never a provider error body, which
+    routinely embeds the prompt (05 §D14.5).
+    """
+
+    index: int
+    duration_ms: int
+    status: int | None = None
+    error: str | None = None
+    backoff_ms: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and (self.status is None or self.status < 400)
+
+
+@dataclass(frozen=True, slots=True)
 class ChatResult:
     message: Message
     tool_calls: list[ToolCall]
@@ -83,6 +110,10 @@ class ChatResult:
     finish_reason: FinishReason
     ttft_ms: int | None = None
     total_ms: int = 0
+    #: Every HTTP request this call actually made. One entry is the normal
+    #: case; more means the adapter retried inside what a trace shows as a
+    #: single span.
+    attempts: tuple[Attempt, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

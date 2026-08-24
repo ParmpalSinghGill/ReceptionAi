@@ -48,6 +48,7 @@ import httpx
 import structlog
 from packages.core.errors import ConfigurationError, PortUnavailableError
 from packages.core.ports.llm import (
+    Attempt,
     ChatResult,
     FinishReason,
     Message,
@@ -446,7 +447,10 @@ class OpenAICompatibleLLMAdapter:
             body["response_format"] = response_format
 
         started = time.perf_counter()
-        payload = await self._post_json(body, timeout_ms=timeout_ms)
+        attempts: list[Attempt] = []
+        payload = await self._post_json(
+            body, timeout_ms=timeout_ms, record=attempts
+        )
         total_ms = int((time.perf_counter() - started) * 1000)
 
         choices = payload.get("choices") or []
@@ -496,6 +500,7 @@ class OpenAICompatibleLLMAdapter:
             provider=self.provider,
             finish_reason=_finish_reason(choice.get("finish_reason")),
             total_ms=total_ms,
+            attempts=tuple(attempts),
         )
 
     async def stream(
@@ -743,10 +748,21 @@ class OpenAICompatibleLLMAdapter:
         return random.random() * capped / 1000.0  # noqa: S311 - jitter, not crypto
 
     async def _post_json(
-        self, body: dict[str, Any], *, timeout_ms: int
+        self, body: dict[str, Any], *, timeout_ms: int, record: list[Attempt]
     ) -> dict[str, Any]:
+        """POST with retry, appending one :class:`Attempt` per request made.
+
+        ``record`` is filled even when the call ultimately fails, and even on
+        the paths that raise — the caller needs the timing of a failed attempt
+        more than that of a successful one. A trace span covers this whole
+        method, so without the record "23s, one call" and "three requests plus
+        two backoffs" look identical, and they have opposite fixes.
+        """
         last_error: Exception | None = None
         for attempt in range(self._max_attempts):
+            started = time.perf_counter()
+            status: int | None = None
+            error: str | None = None
             try:
                 response = await self._client.post(
                     f"{self._base_url}/chat/completions",
@@ -756,14 +772,49 @@ class OpenAICompatibleLLMAdapter:
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
+                # The TYPE, never str(exc): a provider error body routinely
+                # embeds the request, and therefore the prompt (05 §D14.5).
+                error = type(exc).__name__
             else:
+                status = response.status_code
                 if response.status_code < 400:
+                    record.append(
+                        Attempt(
+                            index=attempt,
+                            duration_ms=int((time.perf_counter() - started) * 1000),
+                            status=status,
+                        )
+                    )
                     return dict(response.json())
                 last_error = self._status_error(response)
                 if response.status_code not in _RETRYABLE_STATUSES:
+                    record.append(
+                        Attempt(
+                            index=attempt,
+                            duration_ms=int((time.perf_counter() - started) * 1000),
+                            status=status,
+                            error="not_retryable",
+                        )
+                    )
                     raise last_error
-            if attempt + 1 < self._max_attempts:
-                await asyncio.sleep(self._backoff_seconds(attempt))
+                error = "retryable_status"
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            backoff = (
+                self._backoff_seconds(attempt)
+                if attempt + 1 < self._max_attempts
+                else 0.0
+            )
+            record.append(
+                Attempt(
+                    index=attempt,
+                    duration_ms=elapsed_ms,
+                    status=status,
+                    error=error,
+                    backoff_ms=int(backoff * 1000),
+                )
+            )
+            if backoff:
+                await asyncio.sleep(backoff)
 
         raise self._exhausted(last_error)
 

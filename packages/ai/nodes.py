@@ -438,6 +438,7 @@ class NodeFactory:
                         "gen_ai.response.tool_calls",
                         [call.name for call in result.tool_calls],
                     )
+                    _record_attempts(gen, result)
                     gen.set_content(output=result.message)
                 usage_total = _sum_usage(usage_total, result.usage)
 
@@ -1132,6 +1133,7 @@ class NodeFactory:
                     timeout_ms=8_000,
                 )
                 gen.set_usage(usage_from_port(result.usage, model=result.model))
+                _record_attempts(gen, result)
                 gen.set_content(output=result.message)
         except Exception:
             log.warning(
@@ -1206,6 +1208,43 @@ _HANDOFF_ANNOUNCEMENT: Final = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def _record_attempts(span: Any, result: Any) -> None:
+    """Put each HTTP attempt of one model call onto its span.
+
+    A generation span covers the whole adapter call, and the adapter retries
+    inside it. So a span reading "23.25s" is either one slow answer or three
+    requests plus two backoff sleeps, and the trace alone could not tell them
+    apart — the question that sent someone to a probe script rather than to
+    Langfuse.
+
+    `attempt_count` is the field to read first: 1 is the normal case and needs
+    no thought. Anything above 1 means the provider failed and we tried again,
+    and the per-attempt detail says how long each took, what status came back,
+    and how long we then slept.
+    """
+    attempts = getattr(result, "attempts", ()) or ()
+    if not attempts:
+        return
+    span.set_attribute("llm.attempt_count", len(attempts))
+    if len(attempts) > 1:
+        # Cheap to read off a span list, and the thing worth alerting on.
+        span.set_attribute("llm.retried", True)
+        span.set_attribute(
+            "llm.retry_wait_ms", sum(a.backoff_ms for a in attempts)
+        )
+    for a in attempts:
+        prefix = f"llm.attempt.{a.index}"
+        span.set_attribute(f"{prefix}.duration_ms", a.duration_ms)
+        if a.status is not None:
+            span.set_attribute(f"{prefix}.status", a.status)
+        if a.error:
+            # A short reason or an exception type — never a provider body,
+            # which routinely embeds the prompt (05 D14.5).
+            span.set_attribute(f"{prefix}.error", a.error)
+        if a.backoff_ms:
+            span.set_attribute(f"{prefix}.backoff_ms", a.backoff_ms)
 
 
 def _node_reply_text(result: dict[str, Any]) -> str:
