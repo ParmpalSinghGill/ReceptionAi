@@ -162,6 +162,8 @@ ignore = [
 # Reads the LOCAL Langfuse over a constant localhost URL from .env.
 "tools/latency.py" = ["S310"]
 "tools/slow_turn.py" = ["S310"]
+# Sends real requests to the configured provider to time them.
+"tools/probe_llm_latency.py" = ["S310", "BLE001"]
 
 # Contract §9: core imports nothing from other packages.
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
