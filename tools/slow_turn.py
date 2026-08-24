@@ -8,6 +8,10 @@
     python tools/slow_turn.py --content            # full prompts and replies
     python tools/slow_turn.py --nudged             # only turns where the guard fired
 
+Reads a PAST turn out of Langfuse and prints how long it took WHEN IT RAN. The
+tool itself returns in about a second — a reported "40.00s" is what the caller
+waited that morning, not time spent here.
+
 Answers "where did those 40 seconds go" with the whole turn laid out in order:
 every model call and tool call with its own duration, the gaps BETWEEN them
 (time the platform spent, not the provider), prompt sizes, token counts, and
@@ -126,8 +130,8 @@ def report(trace_id: str, *, content: bool, width: int | None) -> None:
 
     print("=" * 78)
     print(f"TRACE {trace_id}")
-    print(f"  when      : {d.get('timestamp')}")
-    print(f"  wall clock: {total:.2f}s")
+    print(f"  recorded at      : {d.get('timestamp')}")
+    print(f"  the CALLER waited: {total:.2f}s   (measured then, not now)")
     print(f"  guard nudge fired: {'YES' if NUDGE_MARK in blob else 'no'}")
     print(f"  input     : {_text(d.get('input'), 160)!r}")
     print(f"  output    : {_text(d.get('output'), 160)!r}")
@@ -138,6 +142,8 @@ def report(trace_id: str, *, content: bool, width: int | None) -> None:
     llm = sum(o.get("latency") or 0 for o in spans if o["type"] == "GENERATION")
     tool = sum(o.get("latency") or 0 for o in spans if o["type"] == "TOOL")
 
+    print("\n  Times below are from when this turn RAN. This tool only reads")
+    print("  the record; it does not re-run anything.")
     print(f"\n{'#':>2}  {'kind':<11}{'name':<34}{'start':>8}{'dur':>9}{'gap':>8}")
     print("-" * 78)
     prev_end: datetime | None = root_start
