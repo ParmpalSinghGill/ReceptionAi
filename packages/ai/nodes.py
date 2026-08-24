@@ -396,7 +396,11 @@ class NodeFactory:
 
                 prompt = self._assembler.assemble(
                     agent=agent,
-                    history=history,
+                    # Scaffolding is dropped here too, not only on the final
+                    # pass: this call runs once per tool round, so a nudge left
+                    # in reaches the model as a user turn on every subsequent
+                    # round of the same turn.
+                    history=_conversation_only(history),
                     tool_schemas=grant_schemas,
                     collected_data=collected,
                     running_summary=str(state.get("running_summary") or ""),
@@ -472,9 +476,7 @@ class NodeFactory:
                     ):
                         nudged = True
                         history.append(result.message)
-                        history.append(
-                            Message(role="user", content=_ACTION_NUDGE)
-                        )
+                        history.append(_action_nudge_message())
                         continue
 
                     # Genuinely finished.
@@ -556,7 +558,7 @@ class NodeFactory:
                 # customer — "the tool returned success, no further action is
                 # needed" — which is an engineer's voice in a receptionist's
                 # mouth and names internals the platform frame forbids.
-                history=[m for m in history if m.content != _ACTION_NUDGE],
+                history=_conversation_only(history),
                 # Tools are withheld from the final pass so it must speak. A
                 # model still holding a tool schema after three rounds will
                 # often call it again rather than answer, and the caller gets
@@ -1355,6 +1357,33 @@ _ACTION_NUDGE: Final = (
     "returned', or whether an action was 'already completed' — speak to the "
     "customer in your own voice, in one or two plain sentences."
 )
+
+#: Marks a message as loop scaffolding rather than conversation.
+#:
+#: On the `name` field, not matched by content: the nudge was originally
+#: excluded by comparing text, and the comparison lived at ONE of the two places
+#: that build a prompt from `history`. The tool-loop round (which re-assembles
+#: every iteration) had no such filter, so after a nudge the model saw an
+#: internal instruction sitting in the transcript as something the CALLER had
+#: said — and a trace showed it verbatim in the message list, addressed to a
+#: customer who never typed it. A tag travels with the message; a string
+#: comparison has to be remembered at each new call site.
+_SCAFFOLD_NAME: Final = "_platform_scaffold"
+
+
+def _action_nudge_message() -> Message:
+    """The promise-guard's correction, tagged so no prompt can replay it."""
+    return Message(role="user", content=_ACTION_NUDGE, name=_SCAFFOLD_NAME)
+
+
+def _conversation_only(history: list[Message]) -> list[Message]:
+    """Drop platform scaffolding, leaving what was actually said.
+
+    Every path that turns `history` into a prompt goes through this. That is the
+    point: the previous design filtered in one place and leaked in the other.
+    """
+    return [m for m in history if m.name != _SCAFFOLD_NAME]
+
 
 #: Verbs that assert a booking-state change has ALREADY happened. Matched only
 #: in completed/perfect forms — "booked", "has been moved", "is cancelled" —
