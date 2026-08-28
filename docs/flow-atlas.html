@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReceptionAi Flow Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f4f6f3; --surface:#ffffff; --ink:#212830; --muted:#5d6a70;
+  --line:#d3dad3; --soft:#eaefe9;
+  --chat:#0e7a63; --voice:#c2591c; --danger:#b3372f;
+  --chat-soft:rgba(14,122,99,.08); --voice-soft:rgba(194,89,28,.08);
+  --band:rgba(33,40,48,.035);
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15191c; --surface:#1d2327; --ink:#e6e4dc; --muted:#98a3a8;
+    --line:#39424a; --soft:#232a2f;
+    --chat:#45b899; --voice:#e08a4e; --danger:#e0685e;
+    --chat-soft:rgba(69,184,153,.10); --voice-soft:rgba(224,138,78,.10);
+    --band:rgba(230,228,220,.045);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15191c; --surface:#1d2327; --ink:#e6e4dc; --muted:#98a3a8;
+  --line:#39424a; --soft:#232a2f;
+  --chat:#45b899; --voice:#e08a4e; --danger:#e0685e;
+  --chat-soft:rgba(69,184,153,.10); --voice-soft:rgba(224,138,78,.10);
+  --band:rgba(230,228,220,.045);
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:400 16px/1.6 var(--sans);margin:0}
+.wrap{max-width:1060px;margin:0 auto;padding:48px 28px 96px}
+header.masthead{border-bottom:2px solid var(--ink);padding-bottom:28px;margin-bottom:12px}
+.kicker{font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+h1{font:700 clamp(34px,5vw,52px)/1.05 var(--sans);letter-spacing:-.02em;margin:0 0 14px;text-wrap:balance}
+.lede{max-width:66ch;color:var(--ink);font-size:17px;margin:0 0 18px}
+.meta{font:400 12.5px/1.7 var(--mono);color:var(--muted)}
+.meta code{color:var(--ink)}
+.legend{display:flex;flex-wrap:wrap;gap:18px;align-items:center;font:500 12.5px var(--mono);
+  border:1px solid var(--line);background:var(--surface);border-radius:4px;padding:12px 16px;margin:26px 0 6px}
+.legend .sw{display:inline-block;width:22px;height:0;border-top:3px solid var(--ink);vertical-align:middle;margin-right:7px}
+.legend .sw.chat{border-color:var(--chat)} .legend .sw.voice{border-color:var(--voice)}
+.legend .sw.dash{border-top-style:dashed;border-color:var(--muted)} .legend .sw.dgr{border-color:var(--danger)}
+nav.toc{margin:34px 0 10px;border:1px solid var(--line);background:var(--surface);border-radius:4px;padding:20px 22px}
+nav.toc h2{font:600 12px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;border:0;padding:0}
+nav.toc ol{columns:2;gap:36px;margin:0;padding-left:1.4em;font-size:14.5px}
+nav.toc li{margin:3px 0;break-inside:avoid}
+nav.toc a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line)}
+nav.toc a:hover{border-color:var(--chat);color:var(--chat)}
+nav.toc .fno{font:500 12px var(--mono);color:var(--muted);margin-right:6px}
+@media(max-width:640px){nav.toc ol{columns:1}}
+h2{font:600 24px/1.2 var(--sans);letter-spacing:-.01em;margin:64px 0 6px;padding-top:18px;border-top:1px solid var(--line)}
+h2 .sec{font:600 12px var(--mono);color:var(--muted);letter-spacing:.12em;display:block;margin-bottom:8px;text-transform:uppercase}
+p{max-width:70ch}
+p.note{color:var(--muted);font-size:14.5px}
+code,.path{font:500 .88em var(--mono);background:var(--soft);border-radius:3px;padding:1px 5px}
+figure{margin:26px 0 8px;border:1px solid var(--line);background:var(--surface);border-radius:4px;padding:18px 18px 10px;overflow-x:auto}
+figure svg{max-width:100%;height:auto;display:block;margin:0 auto}
+figcaption{font-size:13.5px;color:var(--muted);max-width:78ch;margin:10px 4px 6px;line-height:1.55}
+figcaption b{color:var(--ink);font-weight:600}
+/* ---- SVG vocabulary ---- */
+svg text{font-family:var(--mono)}
+svg .box{fill:var(--surface);stroke:var(--ink);stroke-width:1.3}
+svg .boxsoft{fill:var(--band);stroke:var(--line);stroke-width:1}
+svg .boxmut{fill:var(--surface);stroke:var(--muted);stroke-width:1;stroke-dasharray:5 3}
+svg .boxchat{fill:var(--chat-soft);stroke:var(--chat);stroke-width:1.3}
+svg .boxvoice{fill:var(--voice-soft);stroke:var(--voice);stroke-width:1.3}
+svg .boxdgr{fill:var(--surface);stroke:var(--danger);stroke-width:1.5}
+svg .lbl{font-size:13px;font-weight:600;fill:var(--ink)}
+svg .lb2{font-size:12px;font-weight:500;fill:var(--ink)}
+svg .sub{font-size:10.5px;fill:var(--muted)}
+svg .tag{font-size:9.5px;fill:var(--muted);letter-spacing:.08em}
+svg .anno{font-size:11px;fill:var(--muted)}
+svg .elbl{font-size:10.5px;fill:var(--ink)}
+svg .echat{fill:var(--chat)} svg .evoice{fill:var(--voice)} svg .emut{fill:var(--muted)} svg .edgr{fill:var(--danger)}
+svg .edge{stroke:var(--ink);stroke-width:1.3;fill:none}
+svg .edge2{stroke:var(--ink);stroke-width:1.1;fill:none;stroke-dasharray:5 4}
+svg .edgemut{stroke:var(--muted);stroke-width:1;fill:none;stroke-dasharray:4 3}
+svg .edgechat{stroke:var(--chat);stroke-width:1.4;fill:none}
+svg .edgechat2{stroke:var(--chat);stroke-width:1.2;fill:none;stroke-dasharray:5 4}
+svg .edgevoice{stroke:var(--voice);stroke-width:1.4;fill:none}
+svg .edgevoice2{stroke:var(--voice);stroke-width:1.2;fill:none;stroke-dasharray:5 4}
+svg .edgedgr{stroke:var(--danger);stroke-width:1.3;fill:none;stroke-dasharray:6 4}
+svg .life{stroke:var(--line);stroke-width:1;stroke-dasharray:2 4}
+svg .band{fill:var(--band)}
+svg .bandlbl{font-size:10px;font-weight:600;fill:var(--muted);letter-spacing:.1em}
+svg .mk-ink{fill:var(--ink)} svg .mk-chat{fill:var(--chat)} svg .mk-voice{fill:var(--voice)}
+svg .mk-mut{fill:var(--muted)} svg .mk-dgr{fill:var(--danger)}
+footer{margin-top:72px;border-top:1px solid var(--line);padding-top:18px;font:400 12.5px/1.8 var(--mono);color:var(--muted)}
+a{color:var(--chat)}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header class="masthead">
+  <p class="kicker">Flow reference · drawn from source</p>
+  <h1>ReceptionAi Flow Atlas</h1>
+  <p class="lede">Eleven diagrams covering every flow in the repository: the running system, a chat turn,
+  a voice call, the booking engine, the data model, tenancy enforcement, and the harnesses that verify it all.
+  Every label names a real file, function, port, or constant.</p>
+  <p class="meta">repo <code>ReceptionAi</code> · branch <code>main</code> @ <code>87509d4</code> · drawn 2026-08-28 ·
+  demo tenant <code>sunrise-dental</code>, manifest <code>packages/verticals/manifests/medical.json</code></p>
+</header>
+
+<div class="legend">
+  <span><span class="sw chat"></span>chat path (web_chat)</span>
+  <span><span class="sw voice"></span>voice path (voice_inbound)</span>
+  <span><span class="sw"></span>shared / control</span>
+  <span><span class="sw dash"></span>dashed = return, async, or scaffolded-empty</span>
+  <span><span class="sw dgr"></span>where invalid writes die</span>
+</div>
+
+<nav class="toc">
+  <h2>Figures</h2>
+  <ol>
+    <li><span class="fno">01</span><a href="#f1">System map — processes, ports, vendors</a></li>
+    <li><span class="fno">02</span><a href="#f2">Package layering contract</a></li>
+    <li><span class="fno">03</span><a href="#f3">A chat turn, end to end</a></li>
+    <li><span class="fno">04</span><a href="#f4">The agent graph</a></li>
+    <li><span class="fno">05</span><a href="#f5">Ticket &amp; session lifecycle</a></li>
+    <li><span class="fno">06</span><a href="#f6">A voice call — WebRTC to Deepgram</a></li>
+    <li><span class="fno">07</span><a href="#f7">Voice vs chat pacing</a></li>
+    <li><span class="fno">08</span><a href="#f8">Booking a slot</a></li>
+    <li><span class="fno">09</span><a href="#f9">Data model</a></li>
+    <li><span class="fno">10</span><a href="#f10">Tenancy: the RLS request path</a></li>
+    <li><span class="fno">11</span><a href="#f11">Verification harnesses</a></li>
+  </ol>
+</nav>
+
+<!-- ================================================================ 01 -->
+<h2 id="f1"><span class="sec">01 · Platform</span>System map</h2>
+<p>Three long-running processes plus two Next.js frontends. Chat and voice enter through different
+processes on purpose — Contract A1 keeps realtime audio off the API's event loop, because a slow LLM
+call in a request handler head-of-line blocks audio frames. Both processes run the <b>same</b>
+LangGraph turn from <code>packages/ai</code>.</p>
+
+<figure>
+<svg viewBox="0 0 980 645" role="img" aria-label="System map: browser frontends on ports 3002 and 3003 talk to the FastAPI process on 8000 for chat and the media process on 8100 for voice; both run the shared LangGraph runtime, which calls the LLM provider; Postgres, Redis, Deepgram and Langfuse sit on the data-plane side.">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-chat"/></marker>
+    <marker id="v1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-voice"/></marker>
+    <marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-mut"/></marker>
+  </defs>
+  <text x="120" y="40" text-anchor="middle" class="tag">BROWSER</text>
+  <text x="455" y="40" text-anchor="middle" class="tag">PYTHON PROCESSES</text>
+  <text x="750" y="40" text-anchor="middle" class="tag">DATA PLANE · VENDORS</text>
+
+  <!-- browser -->
+  <rect x="20" y="60" width="200" height="120" class="box" rx="3"/>
+  <text x="34" y="84" class="lbl">marketing · :3002</text>
+  <text x="34" y="104" class="sub">Next.js public site + demo</text>
+  <text x="34" y="126" class="sub echat">ChatPanel — chat widget</text>
+  <text x="34" y="146" class="sub evoice">CallPanel — voice widget</text>
+  <text x="34" y="166" class="sub">useDemoChat / useDemoVoice</text>
+
+  <rect x="20" y="210" width="200" height="66" class="box" rx="3"/>
+  <text x="34" y="234" class="lbl">web · :3003</text>
+  <text x="34" y="254" class="sub">admin portal (Next.js)</text>
+
+  <!-- api -->
+  <rect x="330" y="60" width="250" height="168" class="box" rx="3"/>
+  <text x="344" y="84" class="lbl">apps/api · FastAPI :8000</text>
+  <text x="344" y="106" class="sub">REST + SSE — thin handlers</text>
+  <text x="344" y="124" class="sub">tickets · sessions · rate limits</text>
+  <text x="344" y="142" class="sub">ConversationService (turn orchestration)</text>
+  <text x="344" y="160" class="sub">middleware: RequestId → Tenant → RateLimit</text>
+  <text x="344" y="182" class="sub">assert_all_routes_guarded — an unguarded</text>
+  <text x="344" y="196" class="sub">route crashes the process at startup</text>
+
+  <!-- media -->
+  <rect x="330" y="272" width="250" height="146" class="box" rx="3"/>
+  <text x="344" y="296" class="lbl">apps/media · :8100</text>
+  <text x="344" y="318" class="sub">realtime voice — separate process</text>
+  <text x="344" y="336" class="sub">(Contract A1: LLM latency must not</text>
+  <text x="344" y="350" class="sub">block audio frames)</text>
+  <text x="344" y="372" class="sub">Pipecat pipeline · VoiceSession</text>
+  <text x="344" y="390" class="sub">MAX_SESSIONS 25 → 503 shed</text>
+
+  <!-- shared graph -->
+  <rect x="330" y="470" width="250" height="74" class="boxsoft" rx="3"/>
+  <rect x="330" y="470" width="250" height="74" fill="none" stroke="var(--ink)" stroke-width="1.3" rx="3"/>
+  <text x="344" y="494" class="lbl">packages/ai · GraphRunner</text>
+  <text x="344" y="514" class="sub">the same compiled graph runs in-process</text>
+  <text x="344" y="528" class="sub">in BOTH api and media — no drift</text>
+
+  <path class="edge" d="M455 418 L455 470" marker-end="url(#a1)"/>
+  <path class="edge" d="M330 200 L302 200 L302 507 L330 507" marker-end="url(#a1)"/>
+
+  <!-- data plane -->
+  <rect x="650" y="60" width="210" height="88" class="box" rx="3"/>
+  <text x="664" y="84" class="lbl">postgres · :55432</text>
+  <text x="664" y="104" class="sub">RLS ENABLED + FORCED · pgvector</text>
+  <text x="664" y="122" class="sub">runtime role: receptionai_app</text>
+  <text x="836" y="82" text-anchor="end" class="tag">DOCKER</text>
+
+  <rect x="650" y="178" width="210" height="76" class="box" rx="3"/>
+  <text x="664" y="202" class="lbl">redis · :56379</text>
+  <text x="664" y="222" class="sub">tickets · pending turns</text>
+  <text x="664" y="238" class="sub">slot handles · sessions</text>
+  <text x="836" y="200" text-anchor="end" class="tag">DOCKER</text>
+
+  <rect x="650" y="300" width="210" height="66" class="box" rx="3"/>
+  <text x="664" y="324" class="lbl">LLM provider</text>
+  <text x="664" y="344" class="sub">DeepSeek / any OpenAI-compat</text>
+  <text x="836" y="322" text-anchor="end" class="tag">SAAS</text>
+
+  <rect x="650" y="396" width="210" height="66" class="boxvoice" rx="3"/>
+  <text x="664" y="420" class="lbl">Deepgram</text>
+  <text x="664" y="440" class="sub">STT nova-3 · TTS aura-2</text>
+  <text x="836" y="418" text-anchor="end" class="tag">SAAS</text>
+
+  <rect x="650" y="492" width="210" height="56" class="box" rx="3"/>
+  <text x="664" y="514" class="lbl">Langfuse · :3110</text>
+  <text x="664" y="532" class="sub">turn traces · tenant opt-in capture</text>
+  <text x="836" y="512" text-anchor="end" class="tag">DOCKER</text>
+
+  <!-- edges browser->processes -->
+  <path class="edgechat" d="M220 100 L330 100" marker-end="url(#c1)"/>
+  <text x="275" y="92" text-anchor="middle" class="elbl echat">REST + SSE</text>
+  <path class="edgevoice" d="M220 155 L272 155 L272 320 L330 320" marker-end="url(#v1)"/>
+  <text x="240" y="240" class="elbl evoice">WebRTC:</text>
+  <text x="240" y="254" class="elbl evoice">offer +</text>
+  <text x="240" y="268" class="elbl evoice">audio</text>
+  <path class="edge" d="M220 243 L296 243 L296 190 L330 190" marker-end="url(#a1)"/>
+  <text x="258" y="235" text-anchor="middle" class="elbl">REST · JWT</text>
+
+  <!-- processes -> data plane -->
+  <path class="edge" d="M580 104 L650 104" marker-end="url(#a1)"/>
+  <text x="615" y="96" text-anchor="middle" class="elbl">asyncpg</text>
+  <path class="edge" d="M580 176 L616 176 L616 200 L650 200" marker-end="url(#a1)"/>
+  <text x="612" y="168" text-anchor="middle" class="elbl">tickets · pending</text>
+  <path class="edge" d="M580 300 L622 300 L622 244 L650 244" marker-end="url(#a1)"/>
+  <text x="638" y="290" text-anchor="middle" class="elbl">ticket GETDEL</text>
+  <path class="edgevoice" d="M580 366 L610 366 L610 428 L650 428" marker-end="url(#v1)"/>
+  <text x="612" y="358" text-anchor="middle" class="elbl evoice">audio ws</text>
+  <path class="edge" d="M580 490 L632 490 L632 334 L650 334" marker-end="url(#a1)"/>
+  <text x="628" y="482" text-anchor="middle" class="elbl">chat/completions · httpx · ≤3 attempts</text>
+  <path class="edgemut" d="M455 544 L455 566 L624 566 L624 522 L650 522" marker-end="url(#m1)"/>
+  <text x="530" y="560" class="elbl emut">turn traces</text>
+
+  <!-- observability strip -->
+  <rect x="20" y="590" width="560" height="44" class="boxmut" rx="3"/>
+  <text x="34" y="609" class="sub">observability: otel-collector → prometheus :59090 · tempo · loki → grafana :3001</text>
+  <text x="34" y="625" class="sub">temporal :8080 + 3 workers — scaffolded, empty (booking lifecycles will live there)</text>
+</svg>
+<figcaption><b>Figure 1.</b> The running stack from <code>make dev</code>. Chat traffic (green) terminates in
+<code>apps/api</code>; voice traffic (amber) in <code>apps/media</code>; both hand the turn to the same
+<code>GraphRunner</code>, which is the only thing that talks to the LLM. A missing LLM key falls back to a
+stub adapter locally and hard-crashes anywhere else.</figcaption>
+</figure>
+
+<!-- ================================================================ 02 -->
+<h2 id="f2"><span class="sec">02 · Platform</span>Package layering contract</h2>
+<p>Imports flow one way, and <code>tools/check_layering.py</code> fails CI when they don't. Vendor SDKs are
+quarantined in <code>providers/</code> so an engine swap (say, replacing Pipecat) touches one package.</p>
+
+<figure>
+<svg viewBox="0 0 980 440" role="img" aria-label="Layering: apps import packages, packages import core, core imports nothing; upward imports are blocked by the check_layering CI gate; apps/media reuses apps/api services as a documented exception.">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-dgr"/></marker>
+    <marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-mut"/></marker>
+  </defs>
+  <text x="40" y="38" class="tag">APPS/</text>
+  <rect x="40" y="50" width="150" height="54" class="box" rx="3"/><text x="115" y="74" text-anchor="middle" class="lb2">api</text><text x="115" y="92" text-anchor="middle" class="sub">HTTP + SSE</text>
+  <rect x="210" y="50" width="150" height="54" class="box" rx="3"/><text x="285" y="74" text-anchor="middle" class="lb2">media</text><text x="285" y="92" text-anchor="middle" class="sub">realtime voice</text>
+  <rect x="380" y="50" width="150" height="54" class="box" rx="3"/><text x="455" y="74" text-anchor="middle" class="lb2">marketing</text><text x="455" y="92" text-anchor="middle" class="sub">site + widgets</text>
+  <rect x="550" y="50" width="150" height="54" class="box" rx="3"/><text x="625" y="74" text-anchor="middle" class="lb2">web</text><text x="625" y="92" text-anchor="middle" class="sub">admin portal</text>
+  <rect x="720" y="50" width="150" height="54" class="boxmut" rx="3"/><text x="795" y="74" text-anchor="middle" class="lb2">worker</text><text x="795" y="92" text-anchor="middle" class="sub">temporal — empty</text>
+
+  <path class="edgemut" d="M210 77 L190 77" marker-end="url(#m2)"/>
+  <text x="285" y="122" text-anchor="middle" class="anno">media reuses apps/api/services — documented exception,</text>
+  <text x="285" y="136" text-anchor="middle" class="anno">so voice and chat behavior cannot drift</text>
+
+  <path class="edge" d="M490 104 L490 190" marker-end="url(#a2)"/>
+  <text x="502" y="152" class="elbl">apps import packages — never the reverse</text>
+
+  <text x="40" y="182" class="tag">PACKAGES/</text>
+  <rect x="40"  y="190" width="120" height="54" class="box" rx="3"/><text x="100" y="212" text-anchor="middle" class="lb2">ai</text><text x="100" y="230" text-anchor="middle" class="sub">LangGraph</text>
+  <rect x="172" y="190" width="120" height="54" class="box" rx="3"/><text x="232" y="212" text-anchor="middle" class="lb2">booking</text><text x="232" y="230" text-anchor="middle" class="sub">availability</text>
+  <rect x="304" y="190" width="120" height="54" class="box" rx="3"/><text x="364" y="212" text-anchor="middle" class="lb2">voice</text><text x="364" y="230" text-anchor="middle" class="sub">turn policy</text>
+  <rect x="436" y="190" width="120" height="54" class="box" rx="3"/><text x="496" y="212" text-anchor="middle" class="lb2">persistence</text><text x="496" y="230" text-anchor="middle" class="sub">RLS sessions</text>
+  <rect x="568" y="190" width="120" height="54" class="boxchat" rx="3"/><text x="628" y="212" text-anchor="middle" class="lb2">providers</text><text x="628" y="230" text-anchor="middle" class="sub">vendor SDKs</text>
+  <rect x="700" y="190" width="120" height="54" class="box" rx="3"/><text x="760" y="212" text-anchor="middle" class="lb2">verticals</text><text x="760" y="230" text-anchor="middle" class="sub">manifests</text>
+  <rect x="832" y="190" width="120" height="54" class="box" rx="3"/><text x="892" y="212" text-anchor="middle" class="lb2">observability</text><text x="892" y="230" text-anchor="middle" class="sub">tracing facade</text>
+  <text x="40" y="268" class="anno">vendor SDKs (Pipecat, Deepgram, Langfuse, Redis, httpx adapters) live ONLY in providers/ · connectors/ · channels/</text>
+  <text x="40" y="284" class="anno">scaffolded, empty: channels · connectors · knowledge · billing</text>
+
+  <path class="edge" d="M490 244 L490 320" marker-end="url(#a2)"/>
+  <text x="502" y="288" class="elbl">packages import core</text>
+
+  <rect x="250" y="320" width="480" height="56" class="box" rx="3"/>
+  <text x="490" y="344" text-anchor="middle" class="lb2">core — domain model · ports · errors · ids.uuid7</text>
+  <text x="490" y="362" text-anchor="middle" class="sub">imports NOTHING (all identifiers UUIDv7, one canonical source)</text>
+
+  <path class="edgedgr" d="M880 244 L880 104" marker-end="url(#d2)"/>
+  <text x="895" y="160" class="elbl edgr">✕ upward import</text>
+  <text x="895" y="176" class="elbl edgr">fails CI:</text>
+  <text x="895" y="192" class="elbl edgr">check_layering.py</text>
+
+  <text x="40" y="416" class="anno">sibling gates: check_uuid_usage.py (no uuid4 identifiers — v7 index locality) · check_image_pinning.py (every image @sha256, every Action by commit SHA)</text>
+</svg>
+<figcaption><b>Figure 2.</b> The dependency contract (§9). <code>core</code> is pure and import-free;
+<code>providers</code> is the single quarantine zone for vendor SDKs. The one sanctioned exception is
+<code>apps/media</code> reusing <code>apps/api/services</code> (noted at <code>apps/media/runtime.py:14</code>).</figcaption>
+</figure>
+
+<!-- ================================================================ 03 -->
+<h2 id="f3"><span class="sec">03 · Conversation</span>A chat turn, end to end</h2>
+<p>The shape worth internalizing: <code>POST /messages</code> returns <b>202 immediately</b> — it only
+persists the user turn and stashes it in Redis. One long-lived SSE stream per conversation polls that
+stash every 250&nbsp;ms and runs the turn. Persistence of the assistant's reply is wrapped in
+<code>asyncio.shield</code>, so a browser disconnect mid-stream can't lose the turn.</p>
+
+<figure>
+<svg viewBox="0 0 1000 810" role="img" aria-label="Sequence diagram of a chat turn: session mint, ticket redeem into an SSE stream, message post returning 202, then the stream polling Redis, running the LangGraph turn against the LLM, streaming tokens back, and a shielded finalize writing the assistant turn to Postgres.">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="c3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-chat"/></marker>
+  </defs>
+  <!-- phase bands -->
+  <rect x="20" y="64" width="960" height="106" class="band"/><text x="28" y="80" class="bandlbl">A · MINT A SESSION — POST /api/v1/public/demo/sessions</text>
+  <rect x="20" y="178" width="960" height="88" class="band"/><text x="28" y="194" class="bandlbl">B · OPEN THE STREAM — TICKET → 30-MIN SESSION</text>
+  <rect x="20" y="274" width="960" height="128" class="band"/><text x="28" y="290" class="bandlbl">C · POST THE MESSAGE — RETURNS 202 BEFORE ANY LLM WORK</text>
+  <rect x="20" y="410" width="960" height="360" class="band"/><text x="28" y="426" class="bandlbl">D · THE STREAM RUNS THE TURN</text>
+
+  <!-- lifelines -->
+  <g class="life">
+    <line x1="90" y1="56" x2="90" y2="780"/><line x1="240" y1="56" x2="240" y2="780"/>
+    <line x1="390" y1="56" x2="390" y2="780"/><line x1="540" y1="56" x2="540" y2="780"/>
+    <line x1="690" y1="56" x2="690" y2="780"/><line x1="830" y1="56" x2="830" y2="780"/>
+    <line x1="945" y1="56" x2="945" y2="780"/>
+  </g>
+  <!-- lane heads -->
+  <g>
+    <rect x="35" y="18" width="110" height="38" class="box" rx="3"/><text x="90" y="35" text-anchor="middle" class="lb2">widget</text><text x="90" y="49" text-anchor="middle" class="sub">useDemoChat.ts</text>
+    <rect x="185" y="18" width="110" height="38" class="box" rx="3"/><text x="240" y="35" text-anchor="middle" class="lb2">api</text><text x="240" y="49" text-anchor="middle" class="sub">routers/*</text>
+    <rect x="335" y="18" width="110" height="38" class="box" rx="3"/><text x="390" y="35" text-anchor="middle" class="lb2">redis</text><text x="390" y="49" text-anchor="middle" class="sub">tickets · pending</text>
+    <rect x="475" y="18" width="130" height="38" class="box" rx="3"/><text x="540" y="35" text-anchor="middle" class="lb2">Conversation</text><text x="540" y="49" text-anchor="middle" class="sub">Service</text>
+    <rect x="635" y="18" width="110" height="38" class="box" rx="3"/><text x="690" y="35" text-anchor="middle" class="lb2">postgres</text><text x="690" y="49" text-anchor="middle" class="sub">RLS scoped</text>
+    <rect x="775" y="18" width="110" height="38" class="box" rx="3"/><text x="830" y="35" text-anchor="middle" class="lb2">GraphRunner</text><text x="830" y="49" text-anchor="middle" class="sub">packages/ai</text>
+    <rect x="905" y="18" width="80" height="38" class="box" rx="3"/><text x="945" y="35" text-anchor="middle" class="lb2">LLM</text><text x="945" y="49" text-anchor="middle" class="sub">httpx</text>
+  </g>
+
+  <!-- A -->
+  <path class="edge" d="M90 96 L240 96" marker-end="url(#a3)"/><text x="98" y="89" class="elbl">POST /public/demo/sessions</text>
+  <path class="edge" d="M240 120 L690 120" marker-end="url(#a3)"/><text x="250" y="113" class="elbl">start conversation → INSERT conversations (channel=web_chat)</text>
+  <path class="edge" d="M240 142 L390 142" marker-end="url(#a3)"/><text x="250" y="135" class="elbl">mint ticket · TTL 20 s · single-use</text>
+  <path class="edge2" d="M240 164 L90 164" marker-end="url(#a3)"/><text x="98" y="157" class="elbl">{conversation_id, ticket, greeting}</text>
+
+  <!-- B -->
+  <path class="edgechat" d="M90 210 L240 210" marker-end="url(#c3)"/><text x="98" y="203" class="elbl echat">GET /conversations/{id}/stream?ticket=…  (EventSource)</text>
+  <path class="edge" d="M240 234 L390 234" marker-end="url(#a3)"/><text x="250" y="227" class="elbl">redeem: GETDEL → mint 30-min ConversationSession</text>
+  <path class="edgechat2" d="M240 258 L90 258" marker-end="url(#c3)"/><text x="98" y="251" class="elbl echat">SSE open · event: session (+ HttpOnly cookie) · heartbeat 15 s</text>
+
+  <!-- C -->
+  <path class="edgechat" d="M90 306 L240 306" marker-end="url(#c3)"/><text x="98" y="299" class="elbl echat">POST /messages · X-Conversation-Session</text>
+  <path class="edge" d="M240 328 L540 328" marker-end="url(#a3)"/><text x="250" y="321" class="elbl">record_user_turn()</text>
+  <path class="edge" d="M540 350 L690 350" marker-end="url(#a3)"/><text x="550" y="343" class="elbl">INSERT turns (user) · mint assistant turn_id (UUIDv7)</text>
+  <path class="edge" d="M240 372 L390 372" marker-end="url(#a3)"/><text x="250" y="365" class="elbl">stash conv:pending:{id} · TTL 120 s</text>
+  <path class="edge2" d="M240 394 L90 394" marker-end="url(#a3)"/><text x="98" y="387" class="elbl">202 Accepted {turn_id}</text>
+
+  <!-- D -->
+  <path class="edge" d="M240 444 L390 444" marker-end="url(#a3)"/><text x="250" y="437" class="elbl">stream loop: take_pending (GETDEL) every 250 ms</text>
+  <path class="edge" d="M240 468 L540 468" marker-end="url(#a3)"/><text x="250" y="461" class="elbl">stream_turn(channel=web_chat)</text>
+  <path class="edge" d="M540 492 L690 492" marker-end="url(#a3)"/><text x="550" y="485" class="elbl">load 40-turn history · manifest · collected · timezone</text>
+  <path class="edge" d="M540 516 L830 516" marker-end="url(#a3)"/><text x="550" y="509" class="elbl">run_turn — bounded queue(256) · turn trace</text>
+  <path class="edge" d="M830 540 L945 540" marker-end="url(#a3)"/><text x="838" y="533" class="elbl">chat(msgs, tools)</text>
+  <path class="edge2" d="M945 562 L830 562" marker-end="url(#a3)"/><text x="838" y="555" class="elbl">tool_calls</text>
+  <rect x="760" y="576" width="140" height="30" class="boxsoft" rx="3"/><text x="830" y="595" text-anchor="middle" class="sub">tools execute — fig 8</text>
+  <text x="750" y="595" text-anchor="end" class="anno">≤3 tool rounds, then</text>
+  <path class="edge" d="M830 628 L945 628" marker-end="url(#a3)"/><text x="838" y="621" class="elbl">final pass — tools withheld, must speak</text>
+  <path class="edge2" d="M945 650 L830 650" marker-end="url(#a3)"/><text x="838" y="643" class="elbl">token stream</text>
+  <path class="edgechat" d="M830 684 L90 684" marker-end="url(#c3)"/>
+  <text x="460" y="677" text-anchor="middle" class="elbl echat">SSE frames: token · tool_call · turn_complete — every token through _UnverifiedClaimGuard</text>
+  <path class="edge" d="M540 716 L690 716" marker-end="url(#a3)"/><text x="550" y="709" class="elbl">shielded finalize: assistant turn + collected + outcome</text>
+  <text x="550" y="731" class="anno">asyncio.shield — survives client disconnect mid-stream</text>
+  <text x="500" y="762" text-anchor="middle" class="anno">one SSE stream serves the whole conversation · idle poll 250 ms · idle close after 300 s</text>
+</svg>
+<figcaption><b>Figure 3.</b> A chat turn. Files: <code>apps/api/routers/public_demo.py</code>,
+<code>routers/conversations.py</code>, <code>services/conversations.py</code>, <code>tickets.py</code>,
+<code>state.py</code>, <code>packages/ai/runner.py</code>. The greeting comes from the manifest and is never
+persisted as a turn.</figcaption>
+</figure>
+
+<!-- ================================================================ 04 -->
+<h2 id="f4"><span class="sec">04 · Conversation</span>The agent graph</h2>
+<p>The manifest compiles into a hub-and-spoke LangGraph: every non-terminal agent re-enters
+<code>__guard</code>, which enforces budgets before the router picks the next hop. Routing is a
+constrained text completion, not a tool call — and two structural overrides outrank the model's
+choice: a named destination is authoritative, and an announced handoff is forced through.</p>
+
+<figure>
+<svg viewBox="0 0 800 475" role="img" aria-label="State machine: START enters the guard node, which routes between the receptionist supervisor, four specialist agents, a terminal wrap_up leading to END, and an overflow node that safely closes the conversation when budgets are exceeded.">
+  <defs>
+    <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-mut"/></marker>
+  </defs>
+  <circle cx="70" cy="217" r="7" fill="var(--ink)"/><text x="70" y="200" text-anchor="middle" class="lb2">START</text>
+  <path class="edge" d="M77 217 L280 217" marker-end="url(#a4)"/>
+
+  <rect x="280" y="188" width="150" height="58" class="box" rx="3"/>
+  <text x="355" y="211" text-anchor="middle" class="lb2">__guard</text>
+  <text x="355" y="229" text-anchor="middle" class="sub">budgets · anti-ping-pong</text>
+
+  <text x="40" y="96" class="anno">budgets (manifest, clamped by limits.py):</text>
+  <text x="40" y="112" class="anno">max_steps 24 · max_tool_calls 16</text>
+  <text x="40" y="128" class="anno">wall clock 45 000 ms</text>
+
+  <rect x="280" y="34" width="150" height="58" class="box" rx="3"/>
+  <text x="355" y="57" text-anchor="middle" class="lb2">receptionist</text>
+  <text x="355" y="75" text-anchor="middle" class="sub">supervisor — routes</text>
+  <path class="edge" d="M338 188 L338 92" marker-end="url(#a4)"/>
+  <path class="edge" d="M372 92 L372 188" marker-end="url(#a4)"/>
+  <text x="384" y="145" class="elbl">returns</text>
+  <path class="edgemut" d="M430 50 C 470 36, 470 76, 430 70" marker-end="url(#m4)"/>
+  <text x="478" y="52" class="elbl emut">greeting fast path —</text>
+  <text x="478" y="66" class="elbl emut">answers directly</text>
+
+  <!-- trunk to specialists -->
+  <path class="edge" d="M430 210 L505 210" />
+  <line x1="505" y1="84" x2="505" y2="262" class="edge"/>
+  <path class="edge" d="M505 84 L560 84" marker-end="url(#a4)"/>
+  <path class="edge" d="M505 144 L560 144" marker-end="url(#a4)"/>
+  <path class="edge" d="M505 204 L560 204" marker-end="url(#a4)"/>
+  <path class="edge" d="M505 262 L560 262" marker-end="url(#a4)"/>
+  <path class="edge" d="M505 262 L505 296 L420 296 L420 246" marker-end="url(#a4)"/>
+  <text x="512" y="290" class="elbl">every non-terminal re-enters __guard</text>
+
+  <rect x="560" y="62" width="180" height="44" class="box" rx="3"/><text x="650" y="82" text-anchor="middle" class="lb2">scheduler</text><text x="650" y="98" text-anchor="middle" class="sub">holds the booking tools</text>
+  <rect x="560" y="122" width="180" height="44" class="box" rx="3"/><text x="650" y="142" text-anchor="middle" class="lb2">triage</text><text x="650" y="158" text-anchor="middle" class="sub">emergency assessment</text>
+  <rect x="560" y="182" width="180" height="44" class="box" rx="3"/><text x="650" y="202" text-anchor="middle" class="lb2">practice_faq</text><text x="650" y="218" text-anchor="middle" class="sub">hours · prices · manifest</text>
+  <rect x="560" y="242" width="180" height="44" class="box" rx="3"/><text x="650" y="262" text-anchor="middle" class="lb2">human_transfer</text><text x="650" y="278" text-anchor="middle" class="sub">comms.transfer_to_human</text>
+
+  <rect x="560" y="340" width="180" height="48" class="box" rx="3"/>
+  <text x="650" y="361" text-anchor="middle" class="lb2">wrap_up · terminal</text>
+  <text x="650" y="378" text-anchor="middle" class="sub">speaks once · sets outcome</text>
+  <path class="edge" d="M390 246 L390 364 L560 364" marker-end="url(#a4)"/>
+  <path class="edge" d="M650 388 L650 418" marker-end="url(#a4)"/>
+  <circle cx="650" cy="428" r="8" fill="none" stroke="var(--ink)" stroke-width="1.5"/><circle cx="650" cy="428" r="4" fill="var(--ink)"/>
+  <text x="670" y="432" class="lb2">END</text>
+
+  <rect x="90" y="340" width="170" height="48" class="boxmut" rx="3"/>
+  <text x="175" y="361" text-anchor="middle" class="lb2">__overflow</text>
+  <text x="175" y="378" text-anchor="middle" class="sub">budget hit → safe close</text>
+  <path class="edgemut" d="M310 246 L310 364 L260 364" marker-end="url(#m4)"/>
+  <path class="edgemut" d="M175 388 L175 418" marker-end="url(#m4)"/>
+  <circle cx="175" cy="428" r="8" fill="none" stroke="var(--muted)" stroke-width="1.3"/><circle cx="175" cy="428" r="4" fill="var(--muted)"/>
+  <text x="195" y="432" class="sub">END</text>
+</svg>
+<figcaption><b>Figure 4.</b> Compiled by <code>packages/ai/compiler.py</code>; guard and router in
+<code>routing.py</code> (precedence: overflow → outcome → terminal → next_agent → entrypoint → END);
+nodes in <code>nodes.py</code>. Inside each specialist: a tool loop of at most 3 rounds, then a final
+streamed pass with tools withheld so the model must speak. The guard never raises — it sets
+<code>overflow_reason</code> and lets the router close politely.</figcaption>
+</figure>
+
+<!-- ================================================================ 05 -->
+<h2 id="f5"><span class="sec">05 · Conversation</span>Ticket &amp; session lifecycle</h2>
+<p>Widgets never hold credentials — they hold a 20-second, single-use ticket bound to one conversation.
+Chat exchanges it for a 30-minute session; voice spends it on the WebRTC offer and gets no session at all.</p>
+
+<figure>
+<svg viewBox="0 0 900 310" role="img" aria-label="State diagram: a ticket is minted with a 20 second TTL, may be peeked by an early message post, is redeemed atomically with GETDEL, then either becomes a 30-minute chat session or is consumed by the voice offer; unredeemed tickets expire to a 401.">
+  <defs>
+    <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="c5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-chat"/></marker>
+    <marker id="v5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-voice"/></marker>
+    <marker id="m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-mut"/></marker>
+  </defs>
+  <rect x="40" y="110" width="190" height="66" class="box" rx="3"/>
+  <text x="135" y="134" text-anchor="middle" class="lb2">ticket minted</text>
+  <text x="135" y="152" text-anchor="middle" class="sub">TTL 20 s · single-use</text>
+  <text x="135" y="166" text-anchor="middle" class="sub">bound to one conversation</text>
+
+  <path class="edgemut" d="M100 110 C 90 66, 180 66, 170 110" marker-end="url(#m5)"/>
+  <text x="135" y="58" text-anchor="middle" class="anno">peek — POST /messages may land before the stream opens;</text>
+  <text x="135" y="74" text-anchor="middle" class="anno">reads without consuming (message-first ordering)</text>
+
+  <rect x="330" y="110" width="180" height="66" class="box" rx="3"/>
+  <text x="420" y="134" text-anchor="middle" class="lb2">redeem</text>
+  <text x="420" y="152" text-anchor="middle" class="sub">Redis GETDEL — atomic,</text>
+  <text x="420" y="166" text-anchor="middle" class="sub">a replay finds nothing</text>
+  <path class="edge" d="M230 143 L330 143" marker-end="url(#a5)"/>
+
+  <rect x="610" y="40" width="260" height="66" class="boxchat" rx="3"/>
+  <text x="740" y="64" text-anchor="middle" class="lb2">ConversationSession · 30 min</text>
+  <text x="740" y="82" text-anchor="middle" class="sub">delivered twice: first SSE event</text>
+  <text x="740" y="96" text-anchor="middle" class="sub">+ HttpOnly rai_demo_session cookie</text>
+  <path class="edgechat" d="M510 128 L560 128 L560 73 L610 73" marker-end="url(#c5)"/>
+  <text x="522" y="118" class="elbl echat">chat: GET /stream</text>
+
+  <rect x="610" y="180" width="260" height="66" class="boxvoice" rx="3"/>
+  <text x="740" y="204" text-anchor="middle" class="lb2">spent on POST /voice/offer</text>
+  <text x="740" y="222" text-anchor="middle" class="sub">no session minted — the WebRTC</text>
+  <text x="740" y="236" text-anchor="middle" class="sub">connection itself is the credential</text>
+  <path class="edgevoice" d="M510 158 L560 158 L560 213 L610 213" marker-end="url(#v5)"/>
+  <text x="522" y="180" class="elbl evoice">voice</text>
+
+  <rect x="120" y="230" width="220" height="48" class="boxmut" rx="3"/>
+  <text x="230" y="250" text-anchor="middle" class="lb2">expired</text>
+  <text x="230" y="266" text-anchor="middle" class="sub">TTL elapsed → 401 on redeem</text>
+  <path class="edgemut" d="M150 176 L150 230" marker-end="url(#m5)"/>
+</svg>
+<figcaption><b>Figure 5.</b> <code>apps/api/tickets.py</code>. Credential resolution
+(<code>deps.py: resolve_conversation_access</code>) reconciles ticket, conversation session, and admin JWT
+into one access object; a ticket only ever yields widget-level permissions.</figcaption>
+</figure>
+
+<!-- ================================================================ 06 -->
+<h2 id="f6"><span class="sec">06 · Voice</span>A voice call — WebRTC to Deepgram</h2>
+<p>No telephony provider is wired yet — live voice is browser WebRTC into <code>apps/media</code>. The widget
+asks for the microphone <b>before</b> any network call, so a refusal never creates a conversation row.
+The Pipecat pipeline turns audio into text, hands it to the same graph as chat, and speaks the reply.</p>
+
+<figure>
+<svg viewBox="0 0 980 610" role="img" aria-label="Voice pipeline: the browser posts an SDP offer with a ticket to the media worker, audio flows over WebRTC into a Pipecat pipeline of Deepgram STT, context aggregation, the VoiceAgentProcessor bridge, Deepgram TTS and back out; the bridge drives MediaRuntime.run_turn, which runs the same graph as chat; a turn-policy panel lists the tuned VAD constants.">
+  <defs>
+    <marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="v6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-voice"/></marker>
+    <marker id="m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-mut"/></marker>
+  </defs>
+  <!-- browser -->
+  <rect x="20" y="50" width="230" height="200" class="box" rx="3"/>
+  <text x="34" y="74" class="lbl">browser · CallPanel</text>
+  <text x="34" y="98" class="sub">1 · getUserMedia — mic FIRST</text>
+  <text x="34" y="112" class="sub">    (refusal ⇒ no conversation row)</text>
+  <text x="34" y="132" class="sub">2 · demo session → ticket (fig 5)</text>
+  <text x="34" y="152" class="sub">3 · RTCPeerConnection + mic track</text>
+  <text x="34" y="172" class="sub">4 · data channel "rtvi-ai"</text>
+  <text x="34" y="192" class="sub">5 · ICE gathering ≤ 2.5 s</text>
+  <text x="34" y="216" class="sub">waveform: AnalyserNode meter</text>
+
+  <path class="edgevoice" d="M250 100 L330 100" marker-end="url(#v6)"/>
+  <text x="254" y="90" class="elbl evoice">POST /voice/offer {sdp, ticket}</text>
+  <path class="edgevoice" d="M250 150 L330 150" marker-end="url(#v6)"/>
+  <path class="edgevoice" d="M330 168 L250 168" marker-end="url(#v6)"/>
+  <text x="290" y="143" text-anchor="middle" class="elbl evoice">WebRTC audio</text>
+  <path class="edgemut" d="M330 232 L250 232" marker-end="url(#m6)"/>
+  <text x="326" y="224" text-anchor="end" class="elbl emut">rtvi-ai: user + assistant transcripts</text>
+
+  <!-- media worker -->
+  <rect x="330" y="40" width="630" height="340" fill="none" stroke="var(--ink)" stroke-width="1.4" rx="4"/>
+  <text x="344" y="30" class="tag">APPS/MEDIA :8100 — VOICESESSION (TICKET GETDEL · MAX_SESSIONS 25 → 503)</text>
+
+  <rect x="350" y="70" width="125" height="48" class="box" rx="3"/><text x="412" y="90" text-anchor="middle" class="lb2">transport</text><text x="412" y="106" text-anchor="middle" class="sub">.input()</text>
+  <rect x="500" y="70" width="135" height="48" class="boxvoice" rx="3"/><text x="567" y="90" text-anchor="middle" class="lb2">Deepgram STT</text><text x="567" y="106" text-anchor="middle" class="sub">nova-3 · keyterms</text>
+  <rect x="660" y="70" width="110" height="48" class="box" rx="3"/><text x="715" y="90" text-anchor="middle" class="lb2">context</text><text x="715" y="106" text-anchor="middle" class="sub">aggregator</text>
+  <path class="edge" d="M475 94 L500 94" marker-end="url(#a6)"/>
+  <path class="edge" d="M635 94 L660 94" marker-end="url(#a6)"/>
+  <path class="edge" d="M770 94 L795 94" marker-end="url(#a6)"/>
+  <text x="350" y="140" class="anno">Silero VAD + TurnPolicy (panel below)</text>
+
+  <rect x="795" y="64" width="150" height="122" class="box" rx="3"/>
+  <text x="870" y="86" text-anchor="middle" class="lb2">VoiceAgent</text>
+  <text x="870" y="102" text-anchor="middle" class="lb2">Processor</text>
+  <text x="870" y="122" text-anchor="middle" class="sub">dedupe (2 s window)</text>
+  <text x="870" y="137" text-anchor="middle" class="sub">queue while busy</text>
+  <text x="870" y="152" text-anchor="middle" class="sub">phone-fragment buffer</text>
+  <text x="870" y="167" text-anchor="middle" class="sub">preamble gate (fig 7)</text>
+
+  <rect x="630" y="210" width="150" height="48" class="boxvoice" rx="3"/><text x="705" y="230" text-anchor="middle" class="lb2">Deepgram TTS</text><text x="705" y="246" text-anchor="middle" class="sub">aura-2</text>
+  <rect x="440" y="210" width="140" height="48" class="box" rx="3"/><text x="510" y="230" text-anchor="middle" class="lb2">transport</text><text x="510" y="246" text-anchor="middle" class="sub">.output()</text>
+  <path class="edge" d="M865 186 L865 234 L780 234" marker-end="url(#a6)"/>
+  <text x="856" y="212" text-anchor="end" class="elbl">one _GuardedTTSSpeak frame</text>
+  <path class="edge" d="M630 234 L580 234" marker-end="url(#a6)"/>
+  <path class="edgevoice" d="M440 234 L400 234 L400 340 L330 340" marker-end="url(#v6)"/>
+  <text x="336" y="330" class="elbl evoice">audio out</text>
+
+  <rect x="440" y="296" width="380" height="66" class="boxsoft" rx="3"/>
+  <rect x="440" y="296" width="380" height="66" fill="none" stroke="var(--ink)" stroke-width="1.2" rx="3"/>
+  <text x="454" y="318" class="lb2">MediaRuntime.run_turn — apps/media/runtime.py</text>
+  <text x="454" y="336" class="sub">record_user_turn → stream_turn(channel=voice_inbound) — the SAME</text>
+  <text x="454" y="350" class="sub">graph as figs 3–4; token stream collapsed to one reply string for TTS</text>
+  <path class="edge" d="M920 186 L920 329 L820 329" marker-end="url(#a6)"/>
+  <text x="912" y="266" text-anchor="end" class="elbl">_start_turn → _drain_turns:</text>
+  <text x="912" y="280" text-anchor="end" class="elbl">only the LAST reply is spoken</text>
+
+  <!-- policy panel -->
+  <rect x="20" y="420" width="940" height="170" class="boxsoft" rx="4"/>
+  <text x="36" y="446" class="lb2">packages/voice/turn.py — TurnPolicy (vendor-free, survives an engine swap)</text>
+  <text x="36" y="474" class="sub">stop_secs 0.5 — stock Silero's 0.2 cut callers off mid-thought · confidence 0.7 · start 0.2 s · min_volume 0.6</text>
+  <text x="36" y="496" class="sub">soft_speech_start — quiet speech otherwise produced a final transcript and NO turn at all</text>
+  <text x="36" y="518" class="sub">mute_while_bot_speaks (+ safe unmute on interruption) · block_turn_start_while_busy — a late transcript can't open a turn mid-TTS</text>
+  <text x="36" y="540" class="sub">explicit SpeechTimeoutUserTurnStopStrategy — the default smart-turn analyzer silently ignores stop_secs</text>
+  <text x="36" y="562" class="sub">phone numbers: fragments buffered and flushed only when the agent actually asked for a number (packages/voice/phone.py)</text>
+</svg>
+<figcaption><b>Figure 6.</b> The call path. Entry at <code>apps/media/main.py: offer()</code>; pipeline built
+by <code>packages/providers/voice/pipecat_composed.py</code>; the bridge is
+<code>agent_bridge.py: VoiceAgentProcessor</code>. Hangup calls <code>close_conversation()</code> —
+idempotent, and it writes <code>ABANDONED</code> only when no terminal agent already set an outcome.</figcaption>
+</figure>
+
+<!-- ================================================================ 07 -->
+<h2 id="f7"><span class="sec">07 · Voice</span>Voice vs chat pacing — the one deliberate asymmetry</h2>
+<p>Both channels produce a preamble ("One moment…") when a tool round starts. Chat renders it instantly —
+text costs nothing. Voice owns a single audio channel, so the preamble and the reply must be
+<b>sequenced</b>, or the caller hears one run-on sentence. That sequencing lives only on the call path.</p>
+
+<figure>
+<svg viewBox="0 0 980 540" role="img" aria-label="Side-by-side timelines: on chat, preamble tokens render inline immediately and reply tokens follow in the same bubble with no gating; on voice, interim tokens are diverted, spoken by TTS, then a gate waits for the bot-stopped-speaking frame plus a half-second beat before the reply is spoken, and a caller who keeps talking causes the unspoken reply to be retracted.">
+  <defs>
+    <marker id="c7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-chat"/></marker>
+    <marker id="v7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-voice"/></marker>
+    <marker id="m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-mut"/></marker>
+  </defs>
+  <text x="240" y="36" text-anchor="middle" class="lb2 echat">web_chat — text is immediate</text>
+  <text x="720" y="36" text-anchor="middle" class="lb2 evoice">voice_inbound — one audio channel, sequenced</text>
+
+  <line x1="70" y1="60" x2="70" y2="490" class="edgechat"/>
+  <line x1="550" y1="60" x2="550" y2="490" class="edgevoice"/>
+  <text x="58" y="280" text-anchor="middle" class="tag" transform="rotate(-90 58 280)">TIME →</text>
+  <text x="538" y="280" text-anchor="middle" class="tag" transform="rotate(-90 538 280)">TIME →</text>
+
+  <!-- chat column -->
+  <rect x="92" y="66" width="360" height="42" class="box" rx="3"/>
+  <text x="106" y="84" class="sub">tool round begins — model writes preamble prose</text>
+  <text x="106" y="99" class="sub">_emit_preamble → tokens flagged interim:true</text>
+  <path class="edgechat" d="M272 108 L272 128" marker-end="url(#c7)"/>
+  <rect x="92" y="128" width="360" height="42" class="boxchat" rx="3"/>
+  <text x="106" y="146" class="sub">widget renders “One moment…” inline, instantly —</text>
+  <text x="106" y="161" class="sub">interim is just another token on this path</text>
+  <path class="edgechat" d="M272 170 L272 190" marker-end="url(#c7)"/>
+  <rect x="92" y="190" width="360" height="36" class="box" rx="3"/>
+  <text x="106" y="212" class="sub">booking.check_availability runs</text>
+  <path class="edgechat" d="M272 226 L272 246" marker-end="url(#c7)"/>
+  <rect x="92" y="246" width="360" height="42" class="boxchat" rx="3"/>
+  <text x="106" y="264" class="sub">reply tokens stream into the same bubble</text>
+  <text x="106" y="279" class="sub">(claim-guarded, sentence-buffered)</text>
+  <path class="edgechat" d="M272 288 L272 308" marker-end="url(#c7)"/>
+  <rect x="92" y="308" width="360" height="34" class="box" rx="3"/>
+  <text x="106" y="329" class="sub">turn_complete</text>
+  <text x="92" y="380" class="anno">no gate on this path — _await_preamble_spoken()</text>
+  <text x="92" y="396" class="anno">is never called for chat ("VOICE ONLY", its docstring)</text>
+
+  <!-- voice column -->
+  <rect x="572" y="66" width="380" height="42" class="box" rx="3"/>
+  <text x="586" y="84" class="sub">interim tokens diverted → preamble[] —</text>
+  <text x="586" y="99" class="sub">excluded from the returned reply text (runtime.py)</text>
+  <path class="edgevoice" d="M762 108 L762 128" marker-end="url(#v7)"/>
+  <rect x="572" y="128" width="380" height="36" class="boxvoice" rx="3"/>
+  <text x="586" y="150" class="sub">TTS speaks “One moment…”</text>
+  <path class="edgevoice" d="M762 164 L762 184" marker-end="url(#v7)"/>
+  <rect x="572" y="184" width="380" height="58" fill="var(--voice-soft)" stroke="var(--voice)" stroke-width="1.4" stroke-dasharray="7 4" rx="3"/>
+  <text x="586" y="204" class="lb2 evoice">GATE — _await_preamble_spoken()</text>
+  <text x="586" y="221" class="sub">wait for BotStoppedSpeakingFrame (or interruption)</text>
+  <text x="586" y="236" class="sub">+ 0.5 s human beat · bounded at 12 s</text>
+  <path class="edgevoice" d="M762 242 L762 262" marker-end="url(#v7)"/>
+  <text x="778" y="256" class="anno">tool ran meanwhile — reply is ready</text>
+  <rect x="572" y="262" width="380" height="42" class="boxvoice" rx="3"/>
+  <text x="586" y="280" class="sub">reply pushed as ONE guarded TTS utterance —</text>
+  <text x="586" y="295" class="sub">never interleaved with the preamble</text>
+  <path class="edgemut" d="M762 304 L762 326" marker-end="url(#m7)"/>
+  <rect x="572" y="326" width="380" height="74" class="boxmut" rx="3"/>
+  <text x="586" y="346" class="lb2">caller kept talking?</text>
+  <text x="586" y="364" class="sub">unspoken reply dropped → retract_last_reply()</text>
+  <text x="586" y="379" class="sub">→ turns.is_interruption = true → skipped when history</text>
+  <text x="586" y="394" class="sub">reloads, so the model never “remembers” saying it</text>
+  <text x="572" y="436" class="anno">also voice-only: merge_utterances() dedupes overlapping STT text;</text>
+  <text x="572" y="452" class="anno">_queue_while_busy appends so a two-part utterance survives</text>
+
+  <text x="92" y="436" class="anno">prompt knows the channel too: PLATFORM_FRAME interpolates</text>
+  <text x="92" y="452" class="anno">{channel} — voice prompts ban bullet lists and unreadable codes</text>
+</svg>
+<figcaption><b>Figure 7.</b> The divergence lives in three places:
+<code>packages/ai/nodes.py:_emit_preamble</code> (produces interim tokens, both channels),
+<code>apps/media/runtime.py</code> (diverts them on voice), and
+<code>agent_bridge.py:_await_preamble_spoken</code> (sequences them — voice only). Commit
+<code>d5be2a5</code> is where the overlap was fixed.</figcaption>
+</figure>
+
+<!-- ================================================================ 08 -->
+<h2 id="f8"><span class="sec">08 · Booking</span>Booking a slot</h2>
+<p>The engine, not the model, owns time. <code>check_availability</code> returns exactly one slot behind an
+opaque handle; <code>book_appointment</code> only accepts that handle, and the handle's stored instant wins
+over any time the model composed. The last line of defense is a database exclusion constraint — the only
+place double-booking can actually be prevented under concurrency.</p>
+
+<figure>
+<svg viewBox="0 0 1000 780" role="img" aria-label="Sequence: the scheduler agent checks availability, the availability engine solves against rules and existing bookings, a slot handle is minted in Redis, then book_appointment decodes the handle, normalises the phone, books through BookingService with an idempotency key, and the insert lands on the exclusion constraint that prevents double-booking; a validation funnel of five layers runs along the bottom.">
+  <defs>
+    <marker id="a8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="d8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-dgr"/></marker>
+  </defs>
+  <g class="life">
+    <line x1="110" y1="56" x2="110" y2="620"/><line x1="330" y1="56" x2="330" y2="620"/>
+    <line x1="540" y1="56" x2="540" y2="620"/><line x1="730" y1="56" x2="730" y2="620"/>
+    <line x1="910" y1="56" x2="910" y2="620"/>
+  </g>
+  <rect x="45"  y="18" width="130" height="38" class="box" rx="3"/><text x="110" y="35" text-anchor="middle" class="lb2">scheduler</text><text x="110" y="49" text-anchor="middle" class="sub">LLM agent</text>
+  <rect x="255" y="18" width="150" height="38" class="box" rx="3"/><text x="330" y="35" text-anchor="middle" class="lb2">booking tools</text><text x="330" y="49" text-anchor="middle" class="sub">ai/tools/builtin</text>
+  <rect x="485" y="18" width="110" height="38" class="box" rx="3"/><text x="540" y="35" text-anchor="middle" class="lb2">redis</text><text x="540" y="49" text-anchor="middle" class="sub">slot handles</text>
+  <rect x="655" y="18" width="150" height="38" class="box" rx="3"/><text x="730" y="35" text-anchor="middle" class="lb2">BookingService</text><text x="730" y="49" text-anchor="middle" class="sub">packages/booking</text>
+  <rect x="855" y="18" width="110" height="38" class="box" rx="3"/><text x="910" y="35" text-anchor="middle" class="lb2">postgres</text><text x="910" y="49" text-anchor="middle" class="sub">RLS scoped</text>
+
+  <path class="edge" d="M110 88 L330 88" marker-end="url(#a8)"/><text x="120" y="81" class="elbl">check_availability(service, "next Tuesday morning")</text>
+  <path class="edge" d="M330 114 L730 114" marker-end="url(#a8)"/><text x="340" y="107" class="elbl">find_slots → AvailabilityEngine.solve()</text>
+  <path class="edge" d="M730 140 L910 140" marker-end="url(#a8)"/><text x="740" y="133" class="elbl">rules · exceptions · holidays · items · holds</text>
+  <path class="edge" d="M330 166 L540 166" marker-end="url(#a8)"/><text x="340" y="159" class="elbl">mint slot_ref (TTL 900 s) + alternatives queue (TTL 1800 s)</text>
+  <path class="edge2" d="M330 192 L110 192" marker-end="url(#a8)"/><text x="120" y="185" class="elbl">exactly ONE slot + opaque handle slot_xxxx</text>
+  <text x="120" y="208" class="anno">handles are never spoken — the claim guard scrubs them from every reply</text>
+
+  <rect x="20" y="222" width="960" height="40" class="band"/>
+  <text x="30" y="239" class="anno">caller declines → next_alternative(declined="…") pops the queue (a quote of the refusal is required)</text>
+  <text x="30" y="254" class="anno">caller gives a phone number → check_existing_bookings first</text>
+
+  <path class="edge" d="M110 292 L330 292" marker-end="url(#a8)"/><text x="120" y="285" class="elbl">book_appointment(slot_ref, name, phone)</text>
+  <rect x="220" y="306" width="240" height="40" class="boxsoft" rx="3"/>
+  <text x="240" y="322" class="sub">decode slot_ref — the ENGINE's instant wins</text>
+  <text x="240" y="337" class="sub">over model-composed time · unknown ref → refusal</text>
+  <rect x="220" y="356" width="240" height="26" class="boxsoft" rx="3"/>
+  <text x="240" y="373" class="sub">_normalise_phone BEFORE any write</text>
+  <path class="edge" d="M330 408 L730 408" marker-end="url(#a8)"/><text x="340" y="401" class="elbl">book(idempotency_key = conv:book:service:start_at)</text>
+  <path class="edge" d="M730 434 L910 434" marker-end="url(#a8)"/><text x="740" y="427" class="elbl">re-solve that exact instant — gone ⇒ SlotUnavailable + alternatives</text>
+  <rect x="640" y="448" width="180" height="26" class="boxsoft" rx="3"/>
+  <text x="655" y="465" class="sub">_validate_intake (manifest schema)</text>
+  <path class="edge" d="M730 500 L910 500" marker-end="url(#a8)"/><text x="740" y="493" class="elbl">INSERT bookings → trigger fills booking_items.occupies</text>
+  <rect x="790" y="514" width="200" height="44" class="boxdgr" rx="3"/>
+  <text x="890" y="531" text-anchor="middle" class="sub edgr">EXCLUDE USING gist (tenant, resource,</text>
+  <text x="890" y="546" text-anchor="middle" class="sub edgr">occupies &amp;&amp;) — double-booking dies HERE</text>
+  <path class="edge2" d="M730 576 L330 576" marker-end="url(#a8)"/><text x="340" y="569" class="elbl">booking row + reference BK-XXXXXX</text>
+  <path class="edge2" d="M330 600 L110 600" marker-end="url(#a8)"/><text x="120" y="593" class="elbl">ToolResult: content + structured (arguments never echoed)</text>
+
+  <text x="500" y="638" text-anchor="middle" class="anno">final reply pass runs with succeeded={book_appointment} — “I've booked that” survives the claim guard only because the write happened</text>
+  <text x="500" y="656" text-anchor="middle" class="anno">cancel is two-phase (quote the fee → requires accept_fee) · reschedule mirrors book · all replays absorbed by idempotency keys</text>
+
+  <!-- validation funnel -->
+  <text x="20" y="692" class="tag">VALIDATION LAYERS — EACH FAILURE IS CHEAPER AND MORE SPECIFIC THAN THE NEXT</text>
+  <g>
+    <rect x="20"  y="704" width="180" height="52" class="box" rx="3"/><text x="110" y="726" text-anchor="middle" class="sub">JSON Schema +</text><text x="110" y="741" text-anchor="middle" class="sub">grant arg_constraints</text>
+    <rect x="220" y="704" width="180" height="52" class="box" rx="3"/><text x="310" y="726" text-anchor="middle" class="sub">grant check — executor is</text><text x="310" y="741" text-anchor="middle" class="sub">the whole authz surface</text>
+    <rect x="420" y="704" width="160" height="52" class="box" rx="3"/><text x="500" y="726" text-anchor="middle" class="sub">phone</text><text x="500" y="741" text-anchor="middle" class="sub">normalisation</text>
+    <rect x="600" y="704" width="160" height="52" class="box" rx="3"/><text x="680" y="726" text-anchor="middle" class="sub">intake schema</text><text x="680" y="741" text-anchor="middle" class="sub">(manifest)</text>
+    <rect x="780" y="704" width="200" height="52" class="boxdgr" rx="3"/><text x="880" y="726" text-anchor="middle" class="sub edgr">database EXCLUDE</text><text x="880" y="741" text-anchor="middle" class="sub edgr">constraint — final authority</text>
+    <path class="edge" d="M200 730 L220 730" marker-end="url(#a8)"/>
+    <path class="edge" d="M400 730 L420 730" marker-end="url(#a8)"/>
+    <path class="edge" d="M580 730 L600 730" marker-end="url(#a8)"/>
+    <path class="edgedgr" d="M760 730 L780 730" marker-end="url(#d8)"/>
+  </g>
+</svg>
+<figcaption><b>Figure 8.</b> Tools in <code>packages/ai/tools/builtin/booking.py</code> (granted to the
+<code>scheduler</code> agent only); domain logic in <code>packages/booking/service.py</code> and
+<code>availability.py</code>. Idempotency keys derive from the call site, never from the model, so a
+retried tool call replays instead of double-writing.</figcaption>
+</figure>
+
+<!-- ================================================================ 09 -->
+<h2 id="f9"><span class="sec">09 · Data</span>Data model</h2>
+<p>Four migrations. Every foreign key is composite <code>(tenant_id, id)</code>, so a cross-tenant reference
+is impossible by construction. Conversations and turns are partitioned monthly; the diary <b>is</b> the
+bookings tables — there is no external calendar.</p>
+
+<figure>
+<svg viewBox="0 0 1000 660" role="img" aria-label="Entity diagram: tenants own locations, settings, users with an RBAC chain, conversations with turns, and the booking cluster of bookings, booking items, holds, resources, services and resource types; the exclusion constraint sits on booking items.">
+  <defs>
+    <marker id="a9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="m9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-mut"/></marker>
+  </defs>
+  <rect x="400" y="30" width="200" height="56" class="box" rx="3"/>
+  <text x="500" y="54" text-anchor="middle" class="lb2">tenants</text>
+  <text x="500" y="72" text-anchor="middle" class="sub">status · slug (public resolution)</text>
+
+  <!-- left cluster -->
+  <rect x="40" y="150" width="180" height="46" class="box" rx="3"/><text x="130" y="170" text-anchor="middle" class="lb2">users</text><text x="130" y="186" text-anchor="middle" class="sub">status · sessions</text>
+  <rect x="40" y="230" width="230" height="60" class="box" rx="3"/>
+  <text x="155" y="252" text-anchor="middle" class="sub">user_tenant_roles → roles →</text>
+  <text x="155" y="268" text-anchor="middle" class="sub">role_permissions → permissions</text>
+  <text x="155" y="283" text-anchor="middle" class="tag">RBAC CHAIN</text>
+  <rect x="40" y="330" width="230" height="64" class="box" rx="3"/>
+  <text x="155" y="352" text-anchor="middle" class="lb2">tenant_settings</text>
+  <text x="155" y="370" text-anchor="middle" class="sub">namespace/key → JSONB: installed</text>
+  <text x="155" y="384" text-anchor="middle" class="sub">manifest · tracing capture policy</text>
+  <rect x="40" y="430" width="230" height="50" class="box" rx="3"/>
+  <text x="155" y="450" text-anchor="middle" class="lb2">locations</text>
+  <text x="155" y="468" text-anchor="middle" class="sub">timezone · currency · region</text>
+  <path class="edge" d="M400 66 L130 66 L130 150" marker-end="url(#a9)"/>
+  <path class="edge" d="M130 196 L130 230" marker-end="url(#a9)"/>
+  <path class="edge" d="M420 86 L420 120 L300 120 L300 362 L270 362" marker-end="url(#a9)"/>
+  <path class="edge" d="M300 362 L300 455 L270 455" class="edge" marker-end="url(#a9)"/>
+
+  <!-- center cluster -->
+  <rect x="360" y="170" width="230" height="90" class="box" rx="3"/>
+  <text x="475" y="192" text-anchor="middle" class="lb2">conversations</text>
+  <text x="475" y="210" text-anchor="middle" class="sub">channel · status · outcome (0004)</text>
+  <text x="475" y="225" text-anchor="middle" class="sub">channel_metadata (_agent_collected)</text>
+  <text x="475" y="240" text-anchor="middle" class="tag">PARTITIONED MONTHLY</text>
+  <path class="edge" d="M500 86 L500 170" marker-end="url(#a9)"/>
+  <rect x="360" y="310" width="230" height="96" class="box" rx="3"/>
+  <text x="475" y="332" text-anchor="middle" class="lb2">turns</text>
+  <text x="475" y="350" text-anchor="middle" class="sub">role · content · agent_node · tokens</text>
+  <text x="475" y="365" text-anchor="middle" class="sub">latency · cost · is_interruption</text>
+  <text x="475" y="380" text-anchor="middle" class="tag">PARTITIONED MONTHLY</text>
+  <path class="edge" d="M475 260 L475 310" marker-end="url(#a9)"/>
+  <text x="487" y="292" class="elbl">1 ─ n · sequence</text>
+
+  <!-- right cluster -->
+  <rect x="660" y="130" width="300" height="110" class="box" rx="3"/>
+  <text x="810" y="152" text-anchor="middle" class="lb2">bookings</text>
+  <text x="810" y="172" text-anchor="middle" class="sub">service_period TSTZRANGE [) · blocking_period</text>
+  <text x="810" y="187" text-anchor="middle" class="sub">GENERATED via booking_shift_minutes()</text>
+  <text x="810" y="202" text-anchor="middle" class="sub">status · reference BK-… · idempotency_key</text>
+  <text x="810" y="221" text-anchor="middle" class="sub">customer denormalized — no customers table</text>
+  <path class="edge" d="M600 76 L810 76 L810 130" marker-end="url(#a9)"/>
+  <path class="edge" d="M590 215 L660 185" marker-end="url(#a9)"/>
+  <text x="596" y="200" class="elbl">conversation_id</text>
+
+  <rect x="660" y="290" width="300" height="80" class="box" rx="3"/>
+  <text x="810" y="312" text-anchor="middle" class="lb2">booking_items</text>
+  <text x="810" y="330" text-anchor="middle" class="sub">occupies · is_blocking — trigger-maintained</text>
+  <text x="810" y="352" text-anchor="middle" class="sub edgr">EXCLUDE gist no_overlap — the double-booking wall</text>
+  <path class="edge" d="M810 240 L810 290" marker-end="url(#a9)"/>
+  <text x="822" y="272" class="elbl">1 ─ n</text>
+
+  <rect x="640" y="430" width="150" height="50" class="box" rx="3"/><text x="715" y="450" text-anchor="middle" class="lb2">resources</text><text x="715" y="468" text-anchor="middle" class="sub">chair · practitioner</text>
+  <rect x="820" y="430" width="150" height="50" class="box" rx="3"/><text x="895" y="450" text-anchor="middle" class="lb2">resource_types</text><text x="895" y="468" text-anchor="middle" class="sub">kind</text>
+  <path class="edge" d="M760 370 L715 430" marker-end="url(#a9)"/>
+  <path class="edge" d="M820 455 L790 455" marker-end="url(#a9)"/>
+
+  <rect x="360" y="450" width="230" height="50" class="box" rx="3"/>
+  <text x="475" y="470" text-anchor="middle" class="lb2">services</text>
+  <text x="475" y="488" text-anchor="middle" class="sub">code · duration · buffers · fees</text>
+  <path class="edge" d="M590 458 L625 458 L625 220 L660 220" marker-end="url(#a9)"/>
+  <text x="600" y="448" class="elbl">service_code</text>
+  <path class="edge" d="M590 486 L895 486 L895 480" marker-end="url(#a9)"/>
+  <text x="600" y="500" class="elbl">service_resource_requirements → resource_types</text>
+
+  <rect x="360" y="560" width="280" height="46" class="box" rx="3"/>
+  <text x="500" y="580" text-anchor="middle" class="lb2">booking_holds</text>
+  <text x="500" y="596" text-anchor="middle" class="sub">same exclusion geometry, active holds only</text>
+  <path class="edge" d="M640 583 L715 583 L715 480" marker-end="url(#a9)"/>
+  <rect x="40" y="560" width="230" height="46" class="boxmut" rx="3"/>
+  <text x="155" y="580" text-anchor="middle" class="lb2">waitlist_entries</text>
+  <text x="155" y="596" text-anchor="middle" class="sub">availability_rules · exceptions · holidays</text>
+
+  <text x="500" y="642" text-anchor="middle" class="anno">every FK is composite (tenant_id, id) — cross-tenant references impossible · all ids UUIDv7 from core.ids.uuid7 · every table RLS-forced</text>
+</svg>
+<figcaption><b>Figure 9.</b> Schema across migrations <code>0001</code>–<code>0004</code>. Both period columns
+are half-open <code>[)</code> ranges so back-to-back bookings never collide;
+<code>booking_shift_minutes()</code> exists because <code>make_interval</code> is only STABLE and generated
+columns demand IMMUTABLE.</figcaption>
+</figure>
+
+<!-- ================================================================ 10 -->
+<h2 id="f10"><span class="sec">10 · Data</span>Tenancy: the RLS request path</h2>
+<p>The database is the control; the service layer only re-checks. The runtime role can't bypass RLS even
+with a bug in every layer above it — and an unset tenant GUC matches <b>no</b> rows, so the system fails
+closed rather than open.</p>
+
+<figure>
+<svg viewBox="0 0 980 370" role="img" aria-label="RLS path: a request passes RequestId, TenantContext and RateLimit middleware, the session factory sets the tenant GUC with SET LOCAL semantics inside the transaction, and forced RLS policies filter every row; an unset GUC returns zero rows.">
+  <defs>
+    <marker id="a10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="d10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-dgr"/></marker>
+  </defs>
+  <rect x="20" y="50" width="120" height="46" class="box" rx="3"/><text x="80" y="77" text-anchor="middle" class="lb2">request</text>
+  <rect x="170" y="50" width="140" height="46" class="box" rx="3"/><text x="240" y="71" text-anchor="middle" class="lb2">RequestId</text><text x="240" y="87" text-anchor="middle" class="sub">middleware</text>
+  <rect x="340" y="50" width="170" height="46" class="box" rx="3"/><text x="425" y="71" text-anchor="middle" class="lb2">TenantContext</text><text x="425" y="87" text-anchor="middle" class="sub">resolves ctx.tenant_id</text>
+  <rect x="540" y="50" width="140" height="46" class="box" rx="3"/><text x="610" y="71" text-anchor="middle" class="lb2">RateLimit</text><text x="610" y="87" text-anchor="middle" class="sub">demo + AI buckets</text>
+  <rect x="710" y="50" width="150" height="46" class="box" rx="3"/><text x="785" y="71" text-anchor="middle" class="lb2">handler</text><text x="785" y="87" text-anchor="middle" class="sub">every route guarded</text>
+  <path class="edge" d="M140 73 L170 73" marker-end="url(#a10)"/>
+  <path class="edge" d="M310 73 L340 73" marker-end="url(#a10)"/>
+  <path class="edge" d="M510 73 L540 73" marker-end="url(#a10)"/>
+  <path class="edge" d="M680 73 L710 73" marker-end="url(#a10)"/>
+
+  <rect x="100" y="160" width="380" height="72" class="box" rx="3"/>
+  <text x="114" y="184" class="lb2">SessionFactory.unit_of_work(ctx)</text>
+  <text x="114" y="204" class="sub">BEGIN; SELECT set_config('app.tenant_id', tid, true)</text>
+  <text x="114" y="220" class="sub">— SET LOCAL semantics, scoped to this transaction</text>
+  <path class="edge" d="M785 96 L785 130 L290 130 L290 160" marker-end="url(#a10)"/>
+
+  <rect x="560" y="160" width="380" height="72" class="box" rx="3"/>
+  <text x="574" y="184" class="lb2">RLS policies — ENABLED + FORCED</text>
+  <text x="574" y="204" class="sub">USING tenant_id = app_current_tenant()</text>
+  <text x="574" y="220" class="sub">⇒ rows for this tenant only, on every table</text>
+  <path class="edge" d="M480 196 L560 196" marker-end="url(#a10)"/>
+
+  <rect x="560" y="272" width="380" height="50" class="boxdgr" rx="3"/>
+  <text x="574" y="292" class="sub edgr">GUC unset ⇒ matches NO rows — fails closed.</text>
+  <text x="574" y="308" class="sub edgr">Zero rows unexpectedly? Check the GUC before the data.</text>
+  <path class="edgedgr" d="M750 232 L750 272" marker-end="url(#d10)"/>
+
+  <rect x="100" y="272" width="380" height="72" class="boxsoft" rx="3"/>
+  <text x="114" y="292" class="sub">roles (init/01-roles.sql + migration 0001):</text>
+  <text x="114" y="308" class="sub">receptionai_app — runtime, DML only, NOT owner, no BYPASSRLS</text>
+  <text x="114" y="324" class="sub">migrator — only role issuing DDL · owner — owns tables · reporting — read-only</text>
+  <text x="114" y="340" class="sub">tests connect as the app role — a superuser test proves nothing</text>
+</svg>
+<figcaption><b>Figure 10.</b> Middleware order from <code>apps/api/main.py</code>; the GUC is set in
+<code>packages/persistence/session.py</code>. The RLS test suite (<code>tests/rls/</code>, testcontainers)
+gates merges precisely because it connects as <code>receptionai_app</code> — the role that can't cheat.</figcaption>
+</figure>
+
+<!-- ================================================================ 11 -->
+<h2 id="f11"><span class="sec">11 · Verification</span>The harnesses</h2>
+<p>Every booking bug in this repo's history looked fine in the transcript and wrong in the row — so the
+harnesses assert against the database, never the chat. And because three fixes in a row each repaired one
+channel while breaking the other, chat and voice each have their own harness: run both.</p>
+
+<figure>
+<svg viewBox="0 0 940 330" role="img" aria-label="Two harness paths converge: verify_booking drives the HTTP demo endpoint, verify_voice_booking calls MediaRuntime.run_turn directly; both run the same graph and booking tools and both assert the bookings row in Postgres, not the transcript.">
+  <defs>
+    <marker id="a11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-ink"/></marker>
+    <marker id="c11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-chat"/></marker>
+    <marker id="v11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-voice"/></marker>
+  </defs>
+  <rect x="30" y="50" width="270" height="76" class="boxchat" rx="3"/>
+  <text x="44" y="74" class="lb2">tools/verify_booking.py</text>
+  <text x="44" y="94" class="sub">book → reschedule → cancel over the HTTP</text>
+  <text x="44" y="109" class="sub">demo endpoint · relative dates only ("next</text>
+  <text x="44" y="121" class="sub">Tuesday morning") · non-zero exit on failure</text>
+
+  <rect x="30" y="180" width="270" height="76" class="boxvoice" rx="3"/>
+  <text x="44" y="204" class="lb2">tools/verify_voice_booking.py</text>
+  <text x="44" y="224" class="sub">drives MediaRuntime.run_turn directly —</text>
+  <text x="44" y="239" class="sub">the exact function Pipecat calls after STT ·</text>
+  <text x="44" y="251" class="sub">unique customer per run (no stale-row pass)</text>
+
+  <rect x="400" y="115" width="230" height="76" class="box" rx="3"/>
+  <text x="515" y="142" text-anchor="middle" class="lb2">same graph,</text>
+  <text x="515" y="160" text-anchor="middle" class="lb2">same booking tools</text>
+  <text x="515" y="178" text-anchor="middle" class="sub">figs 4 + 8</text>
+  <path class="edgechat" d="M300 92 L360 92 L360 140 L400 140" marker-end="url(#c11)"/>
+  <path class="edgevoice" d="M300 214 L360 214 L360 168 L400 168" marker-end="url(#v11)"/>
+
+  <rect x="700" y="115" width="220" height="76" class="box" rx="3"/>
+  <text x="810" y="142" text-anchor="middle" class="lb2">assert the bookings ROW</text>
+  <text x="810" y="160" text-anchor="middle" class="sub">printed and checked after every step</text>
+  <text x="810" y="178" text-anchor="middle" class="sub">— never the transcript</text>
+  <path class="edge" d="M630 153 L700 153" marker-end="url(#a11)"/>
+
+  <text x="30" y="296" class="anno">tools/verify_emergency.py — urgent-symptom path: --red-flag must escalate and must NOT book · --bad-phone · --runs N (catches ~1-in-3 flakes)</text>
+  <text x="30" y="314" class="anno">beware fixture poisoning: repeated runs fill the diary and fake a “no availability” regression — reset the demo data between campaigns</text>
+</svg>
+<figcaption><b>Figure 11.</b> The two booking harnesses plus the emergency harness. Latency companions read
+Langfuse over HTTP: <code>tools/latency.py</code> (percentiles), <code>slow_turn.py</code> (one turn's spans
+<b>and the gaps between them</b>), <code>probe_llm_latency.py</code> (was one 23-second span actually three
+retried requests? — the adapter retries up to 3 times with full-jitter backoff).</figcaption>
+</figure>
+
+<footer>
+  Drawn from source on 2026-08-28 · ReceptionAi @ <code>87509d4</code> ·
+  architecture contract: docs/architecture/00-CORE-CONTRACT.md (its §11 amendments supersede the original text) ·
+  scaffolded-and-empty throughout: temporal workers, knowledge ingestion, telephony, billing.
+</footer>
+</div>
+</body>
+</html>
