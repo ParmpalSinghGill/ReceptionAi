@@ -25,6 +25,18 @@ export interface VoiceError {
   retryable: boolean;
 }
 
+/**
+ * Turn-detection lab: which end-of-turn method the media worker should use for
+ * this call. Only sent when the panel's lab controls are showing (`?voicelab=1`);
+ * the worker ignores it unless VOICE_ALLOW_CLIENT_OVERRIDE permits it.
+ */
+export type TurnDetector = "silence" | "smart_turn" | "vap" | "flux";
+
+export interface TurnLabOptions {
+  turnDetector?: TurnDetector;
+  speculative?: boolean;
+}
+
 /** Bars in the live waveform. Matches the hero card's visual density. */
 const BAR_COUNT = 48;
 
@@ -184,7 +196,7 @@ export function useDemoVoice() {
     setMuted(!track.enabled);
   }, []);
 
-  const start = React.useCallback(async () => {
+  const start = React.useCallback(async (lab?: TurnLabOptions) => {
     if (startingRef.current) return;
     startingRef.current = true;
     setError(null);
@@ -325,13 +337,25 @@ export function useDemoVoice() {
           type: pc.localDescription?.type,
           ticket: session.ticket,
           conversation_id: session.conversation_id,
+          ...(lab?.turnDetector ? { turn_detector: lab.turnDetector } : {}),
+          ...(lab?.speculative !== undefined ? { speculative: lab.speculative } : {}),
         }),
       });
       if (!res.ok) {
+        // A 422 names exactly what is missing (e.g. the VAP model is not
+        // installed); say that rather than a generic failure.
+        let detail = "";
+        if (res.status === 422) {
+          try {
+            detail = String((await res.json())?.detail ?? "");
+          } catch {
+            detail = "";
+          }
+        }
         throw new ApiError(
           res.status === 503
             ? "All demo lines are busy right now. Try again in a moment."
-            : "Could not start the call.",
+            : detail || "Could not start the call.",
           res.status,
         );
       }

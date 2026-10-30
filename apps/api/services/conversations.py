@@ -198,6 +198,42 @@ class ConversationService:
         )
         return True
 
+    async def withdraw_speculative_turn(
+        self, *, ctx: TenantContext, conversation_id: UUID, user_text: str
+    ) -> bool:
+        """Undo a speculative voice turn the caller talked on past.
+
+        Two rows may exist: the caller's half-sentence, and whatever partial
+        reply the cancelled run persisted. The reply is retracted first (it is
+        the newest row), then the caller line is withdrawn, in one transaction
+        so the next turn never loads history with only one of the two undone.
+
+        Never raises. Returns whether the caller line was withdrawn.
+        """
+        try:
+            async with self._sessions.unit_of_work(ctx) as session:
+                conversation = await self._require_conversation(
+                    session, conversation_id
+                )
+                turns = TurnRepository(session)
+                await turns.retract_latest_reply(conversation=conversation)
+                withdrawn = await turns.withdraw_latest_user_turn(
+                    conversation=conversation, content=user_text
+                )
+        except Exception:
+            log.exception(
+                "conversation.withdraw_failed",
+                tenant_id=str(ctx.tenant_id),
+                conversation_id=str(conversation_id),
+            )
+            return False
+        log.info(
+            "conversation.speculative_turn_withdrawn",
+            conversation_id=str(conversation_id),
+            withdrawn=withdrawn is not None,
+        )
+        return withdrawn is not None
+
     async def stream_turn(
         self,
         *,
@@ -206,6 +242,7 @@ class ConversationService:
         turn_id: UUID,
         user_text: str,
         channel: str = "web_chat",
+        result: TurnResult | None = None,
     ) -> AsyncIterator[TurnEvent]:
         """Run one turn, yielding events, then persist the result.
 
@@ -247,8 +284,9 @@ class ConversationService:
 
         # `result` is an out-parameter: an async generator's return value is
         # unreachable from an `async for`, so the runner fills this in as it
-        # goes and the `finally` below reads it.
-        result = TurnResult()
+        # goes and the `finally` below reads it. A caller may pass its own to
+        # read usage and latency afterwards (the voice metrics do).
+        result = result if result is not None else TurnResult()
         try:
             async for event in self._runner.run_turn(
                 tenant_id=ctx.tenant_id,
@@ -632,6 +670,11 @@ class ConversationService:
         messages: list[Message] = []
         for turn in turns:
             if turn.role == TurnRole.USER and turn.content:
+                if turn.is_interruption:
+                    # Withdrawn: recorded for a speculative voice turn that the
+                    # caller talked on past. The confirmed turn carries the
+                    # whole sentence. See `withdraw_speculative_turn`.
+                    continue
                 if messages and messages[-1].role == "user":
                     # Two caller utterances with no reply between them are
                     # one thought that arrived in two pieces (the reply to

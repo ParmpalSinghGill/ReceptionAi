@@ -12,9 +12,16 @@ Pipecat does not also silently replace the debugging behind these values.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import StrEnum
 
-__all__ = ["STOP_SECS_DEFAULT", "TurnPolicy", "clamp_stop_secs"]
+__all__ = [
+    "STOP_SECS_DEFAULT",
+    "TurnDetectionConfig",
+    "TurnDetector",
+    "TurnPolicy",
+    "clamp_stop_secs",
+]
 
 #: Floor and ceiling for end-of-turn silence. Below 0.1s ordinary inter-word
 #: pauses end the turn and the caller is cut off mid-sentence; above 3s the
@@ -102,3 +109,112 @@ class TurnPolicy:
     def from_stop_secs(cls, stop_secs: float | None) -> TurnPolicy:
         """The common case: everything stock except end-of-turn silence."""
         return cls(stop_secs=clamp_stop_secs(stop_secs))
+
+
+# ── End-of-turn detection: which method decides the caller has finished ──────
+
+
+class TurnDetector(StrEnum):
+    """How the end of a caller's turn is decided. Selectable per call.
+
+    Every detector keeps Silero VAD running, even the ones that do not use it
+    to decide: VAD is what the latency metrics measure "the caller's last word"
+    against, and measuring all four methods against the same clock is what
+    makes their numbers comparable.
+    """
+
+    #: Fixed silence after VAD stop. The production setting before detectors
+    #: were selectable, kept unchanged as the baseline.
+    SILENCE = "silence"
+
+    #: Pipecat Smart Turn v3 — an audio model that reads intonation and
+    #: rhythm at each pause and answers "finished" or "not yet".
+    SMART_TURN = "smart_turn"
+
+    #: Voice Activity Projection (Ekstedt & Skantze 2022) — predicts who
+    #: speaks next over the coming two seconds; a predicted shift to the agent
+    #: ends the caller's turn. Needs ``tools/setup_vap.py`` and PyTorch.
+    VAP = "vap"
+
+    #: Deepgram Flux — speech-to-text with its own end-of-turn model, so
+    #: transcription and turn detection come from one service.
+    FLUX = "flux"
+
+
+#: Silero stop for the model-based detectors. Short on purpose: it only marks
+#: the pause at which the model is asked, and the model — not this number —
+#: decides. 0.2s is the value Smart Turn was trained against.
+MODEL_VAD_STOP_SECS = 0.2
+
+#: Longest pause a model-based detector may call "not finished" before the
+#: turn is ended anyway. Covers the ~0.9s gaps between spoken digit groups
+#: with room, without leaving a caller who has really finished waiting long.
+MAX_SILENCE_SECS_DEFAULT = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class TurnDetectionConfig:
+    """Which detector runs, and the few numbers each one needs.
+
+    Resolved once per call. The defaults reproduce the pre-existing behaviour
+    exactly (``silence``, no speculation), so a deployment that sets nothing
+    sees no change.
+    """
+
+    detector: TurnDetector = TurnDetector.SILENCE
+
+    #: Start the agent on an *early* end-of-turn signal, before the detector
+    #: has confirmed it. A confirmed turn whose text matches reuses the work;
+    #: the caller resuming cancels it. Booking writes wait for confirmation.
+    speculative: bool = False
+
+    #: Ceiling on a model detector's "not finished yet" (smart_turn, vap).
+    max_silence_secs: float = MAX_SILENCE_SECS_DEFAULT
+
+    #: VAP: probability that the agent speaks next above which the caller's
+    #: turn is over.
+    vap_threshold: float = 0.5
+
+    #: Flux model and its two confidence thresholds. ``eager`` is the early
+    #: signal speculation starts on; it is only sent when speculation is on.
+    #: Where ``tools/setup_vap.py`` put the VAP code and weights.
+    vap_model_dir: str = "~/.receptionai-models/vap"
+
+    flux_model: str = "flux-general-en"
+    flux_eot_threshold: float = 0.7
+    flux_eager_eot_threshold: float = 0.5
+
+    @classmethod
+    def parse(
+        cls,
+        detector: str | TurnDetector | None,
+        *,
+        speculative: bool | None = None,
+        base: TurnDetectionConfig | None = None,
+    ) -> TurnDetectionConfig:
+        """Overlay a detector name and speculation flag on a base config.
+
+        Raises ``ValueError`` on an unknown detector name, so a typo in an
+        environment variable fails at startup rather than silently running the
+        baseline and labelling its rows with the wrong detector.
+        """
+        cfg = base or cls()
+        if detector is not None and str(detector).strip():
+            cfg = replace(cfg, detector=TurnDetector(str(detector).strip().lower()))
+        if speculative is not None:
+            cfg = replace(cfg, speculative=bool(speculative))
+        return replace(
+            cfg,
+            max_silence_secs=max(0.3, min(5.0, float(cfg.max_silence_secs))),
+            vap_threshold=max(0.05, min(0.95, float(cfg.vap_threshold))),
+        )
+
+    @property
+    def uses_model_vad_stop(self) -> bool:
+        """Whether VAD's stop is a short "ask the model" pause."""
+        return self.detector in (TurnDetector.SMART_TURN, TurnDetector.VAP)
+
+    @property
+    def label(self) -> str:
+        """What a metrics row calls this configuration."""
+        return f"{self.detector.value}{'+spec' if self.speculative else ''}"

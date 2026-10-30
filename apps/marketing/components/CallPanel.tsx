@@ -8,7 +8,31 @@ import {
   Waveform,
   cn,
 } from "@receptionai/ui";
-import { useDemoVoice } from "../lib/useDemoVoice";
+import { type TurnDetector, useDemoVoice } from "../lib/useDemoVoice";
+
+/**
+ * Turn-detection lab. Hidden from visitors; shown when the page is opened with
+ * `?voicelab=1`, so the methods can be compared on real calls without a
+ * restart. Each call's choice is recorded on every metrics row it produces.
+ */
+const TURN_DETECTORS: { value: TurnDetector; label: string }[] = [
+  { value: "silence", label: "Silence timeout (baseline)" },
+  { value: "smart_turn", label: "Smart Turn v3" },
+  { value: "vap", label: "Voice Activity Projection" },
+  { value: "flux", label: "Deepgram Flux" },
+];
+
+function useVoiceLab(): boolean {
+  const [enabled, setEnabled] = React.useState(false);
+  React.useEffect(() => {
+    try {
+      setEnabled(new URLSearchParams(window.location.search).get("voicelab") === "1");
+    } catch {
+      setEnabled(false);
+    }
+  }, []);
+  return enabled;
+}
 
 /**
  * The live voice demo — a real call in the browser.
@@ -37,6 +61,10 @@ export function CallPanel({ onClose }: { onClose: () => void }) {
     microphoneId,
     setMicrophoneId,
   } = useDemoVoice();
+
+  const lab = useVoiceLab();
+  const [detector, setDetector] = React.useState<TurnDetector>("silence");
+  const [speculative, setSpeculative] = React.useState(false);
 
   const logRef = React.useRef<HTMLDivElement>(null);
   const primaryRef = React.useRef<HTMLButtonElement>(null);
@@ -137,6 +165,41 @@ export function CallPanel({ onClose }: { onClose: () => void }) {
               ) : null}
             </div>
           ) : null}
+          {lab ? (
+            <fieldset className="mb-3 rounded-input border border-line p-3" disabled={live}>
+              <legend className="px-1 font-sans text-label font-semibold uppercase tracking-[var(--text-label-tracking)] text-fg-subtle">
+                Turn detection lab
+              </legend>
+              <label htmlFor="turn-detector" className="sr-only">
+                End-of-turn detector
+              </label>
+              <select
+                id="turn-detector"
+                value={detector}
+                onChange={(e) => setDetector(e.target.value as TurnDetector)}
+                className="w-full rounded-input border border-line bg-bg-inset px-3 py-2 font-sans text-body-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {TURN_DETECTORS.map((d) => (
+                  <option key={d.value} value={d.value}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+              <label className="mt-2 flex items-center gap-2 font-sans text-body-sm text-fg">
+                <input
+                  type="checkbox"
+                  checked={speculative}
+                  onChange={(e) => setSpeculative(e.target.checked)}
+                />
+                Speculative start (answer on an early end-of-turn guess)
+              </label>
+              {live ? (
+                <p className="mt-1.5 font-sans text-caption text-fg-subtle">
+                  Hang up to change the method.
+                </p>
+              ) : null}
+            </fieldset>
+          ) : null}
           {error ? (
             <div
               role="alert"
@@ -175,7 +238,9 @@ export function CallPanel({ onClose }: { onClose: () => void }) {
               <Button
                 ref={primaryRef}
                 size="md"
-                onClick={() => void start()}
+                onClick={() =>
+                  void start(lab ? { turnDetector: detector, speculative } : undefined)
+                }
                 disabled={connecting}
               >
                 {connecting

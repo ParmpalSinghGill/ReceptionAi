@@ -111,6 +111,32 @@ class Settings(BaseSettings):
     #: the stub exactly as it will against a real provider. Zero in tests.
     stub_token_delay_ms: int = 15
 
+    # ── Voice turn detection (apps/media) ─────────────────────────────────
+    #
+    # Which method decides the caller has finished speaking. One of
+    # `silence` (the original fixed-silence baseline), `smart_turn`, `vap`,
+    # `flux`. The call panel can override these per call when
+    # `voice_allow_client_override` is on — see `.env.example`.
+    voice_turn_detector: str = "silence"
+    #: Start the agent on an early end-of-turn signal; writes wait for
+    #: confirmation (`packages.ai.tools.gate`).
+    voice_speculative: bool = False
+    #: Longest "not finished yet" a model detector may hold a pause for.
+    voice_max_silence_secs: float = 2.0
+    voice_vap_threshold: float = 0.5
+    #: Where `tools/setup_vap.py` put the VAP code and weights.
+    voice_vap_dir: str = "~/.receptionai-models/vap"
+    voice_flux_model: str = "flux-general-en"
+    voice_flux_eot_threshold: float = 0.7
+    voice_flux_eager_eot_threshold: float = 0.5
+    #: Per-turn latency rows (`turns.csv`) and per-call event logs.
+    voice_metrics_enabled: bool = True
+    voice_metrics_dir: str = "var/voice_metrics"
+    #: Let the browser pick the detector per call. Unset means: allowed
+    #: locally, refused everywhere else — a public caller must not be able to
+    #: switch a production tenant's turn-taking.
+    voice_allow_client_override: bool | None = None
+
     # ── Demo widget ───────────────────────────────────────────────────────
     demo_tenant_slug: str = "sunrise-dental"
     #: PHASE1-API-CONTRACT: single-use, 20s TTL, scoped to one conversation.
@@ -202,6 +228,12 @@ class Settings(BaseSettings):
     @property
     def is_local(self) -> bool:
         return self.env in ("local", "test", "ci")
+
+    @property
+    def voice_client_override_allowed(self) -> bool:
+        if self.voice_allow_client_override is not None:
+            return self.voice_allow_client_override
+        return self.is_local
 
     @property
     def llm_api_key(self) -> str:

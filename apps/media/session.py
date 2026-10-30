@@ -22,6 +22,7 @@ from uuid import UUID
 import structlog
 from apps.media.metrics import VOICE_TURNS, SessionMetrics
 from apps.media.runtime import MediaRuntime
+from packages.voice.call_metrics import CallMetrics, TurnRecord
 from packages.voice.engine.config import TenantVoiceConfig, VoiceMode
 
 __all__ = ["VoiceSession", "VoiceSessionParams"]
@@ -37,6 +38,8 @@ class VoiceSessionParams:
     conversation_id: UUID
     cfg: TenantVoiceConfig
     greeting: str | None = None
+    #: This call's latency/turn-taking metrics, or ``None`` when disabled.
+    metrics: CallMetrics | None = None
 
 
 class VoiceSession:
@@ -69,6 +72,7 @@ class VoiceSession:
         user_text: str,
         *,
         speak_interim: Callable[[str], Awaitable[None]] | None = None,
+        record: TurnRecord | None = None,
     ) -> str:
         """Bridge to the platform agent. Same graph, same tools, same rows."""
         try:
@@ -77,6 +81,7 @@ class VoiceSession:
                 conversation_id=self._params.conversation_id,
                 user_text=user_text,
                 on_interim=speak_interim,
+                record=record,
             )
         except asyncio.CancelledError:
             raise
@@ -95,6 +100,14 @@ class VoiceSession:
         await self._runtime.retract_last_reply(
             tenant_id=self._params.tenant_id,
             conversation_id=self._params.conversation_id,
+        )
+
+    async def _withdraw_speculative(self, user_text: str) -> None:
+        """A speculative turn missed; take its rows out of the model's view."""
+        await self._runtime.withdraw_speculative_turn(
+            tenant_id=self._params.tenant_id,
+            conversation_id=self._params.conversation_id,
+            user_text=user_text,
         )
 
     async def _on_transcript(self, role: str, text: str) -> None:
@@ -140,7 +153,30 @@ class VoiceSession:
             retract_last_reply=self._retract_last_reply,
             on_transcript=self._on_transcript,
             shared_state=self._state,  # type: ignore[arg-type]
+            metrics=self._params.metrics,
+            withdraw_speculative=self._withdraw_speculative,
         )
+
+    def pipeline_observers(self) -> tuple[object, list[object]]:
+        """The worker clock and observers that feed this call's metrics.
+
+        Returned as a pair because they must be the *same* clock instance: the
+        observer converts frame timestamps using the clock's origin.
+        """
+        from packages.providers.voice.metrics_observer import (
+            MetricsClock,
+            VoiceMetricsObserver,
+        )
+
+        clock = MetricsClock()  # type: ignore[no-untyped-call]
+        if self._params.metrics is None:
+            return clock, []
+        return clock, [VoiceMetricsObserver(self._params.metrics, clock)]
+
+    def close_metrics(self) -> None:
+        """Write this call's outstanding rows and event log. Idempotent."""
+        if self._params.metrics is not None:
+            self._params.metrics.close()
 
     def metrics(self) -> SessionMetrics:
         mode = self._params.cfg.resolved_mode

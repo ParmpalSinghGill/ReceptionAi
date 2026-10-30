@@ -606,6 +606,53 @@ class TurnRepository(TenantRepository[Turn]):
         )
         return latest
 
+    async def withdraw_latest_user_turn(
+        self, *, conversation: Conversation, content: str
+    ) -> Turn | None:
+        """Withdraw a caller line recorded for a speculative turn that missed.
+
+        A speculative voice turn records the caller's words on an *early*
+        end-of-turn guess. When the caller turns out to have been pausing, the
+        confirmed turn carries the complete sentence — and the half-sentence row
+        must leave the model's view, or history replays it in front of the
+        whole: "book me for Thursday book me for Thursday at eleven".
+
+        Uses ``is_interruption`` on a USER row to mean "withdrawn"; history
+        replay skips such rows. The row itself stays, as a record of what was
+        heard. ``interruption_count`` is not incremented: nobody interrupted
+        anybody, the system guessed early.
+
+        Guarded like :meth:`retract_latest_reply`: the row must be the newest
+        user turn, everything after it must be an already-retracted reply or a
+        tool/event row from the cancelled run, and its text must match. Anything
+        else is history that really happened. Returns the row, or ``None``.
+        """
+        if conversation.tenant_id != self.tenant_id:
+            raise EntityNotFoundError(
+                entity_type="conversations", entity_id=conversation.id
+            )
+        stmt = (
+            self._base_select()
+            .where(Turn.conversation_id == conversation.id)
+            .order_by(Turn.sequence.desc())
+            .limit(10)
+        )
+        for turn in (await self.session.execute(stmt)).scalars():
+            if turn.role in (TurnRole.TOOL, TurnRole.EVENT):
+                continue
+            if turn.role == TurnRole.ASSISTANT:
+                if turn.is_interruption:
+                    continue
+                return None
+            if turn.role != TurnRole.USER or turn.is_interruption:
+                return None
+            if (turn.content or "").strip() != content.strip():
+                return None
+            turn.is_interruption = True
+            await self.session.flush()
+            return turn
+        return None
+
     async def replay(
         self, conversation_id: UUID, *, limit: int = 500
     ) -> Sequence[Turn]:

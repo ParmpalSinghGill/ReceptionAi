@@ -46,6 +46,7 @@ from typing import Any
 
 import jsonschema
 import structlog
+from packages.ai.tools.gate import await_side_effect_clearance
 from packages.ai.tools.registry import (
     ToolExecutionContext,
     ToolRegistry,
@@ -351,6 +352,12 @@ class ToolExecutor:
 
         # ── 6. EXECUTE ────────────────────────────────────────────────────
         #
+        # A write inside a speculative voice turn waits here until the caller
+        # is confirmed to have finished; see `packages.ai.tools.gate`. Before
+        # the budget is computed, so the wait does not eat the tool's timeout.
+        if spec.side_effecting:
+            await await_side_effect_clearance(call.name)
+
         # The budget is the tool's own timeout capped by what remains of the
         # turn's deadline, floored so it is never zero or negative. A tool that
         # outlives the turn is billing for an answer nobody will hear.

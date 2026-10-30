@@ -20,6 +20,7 @@ two copies would diverge on the first change to either.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
@@ -28,7 +29,7 @@ import structlog
 from apps.api.services.booking import build_booking_tool_deps
 from apps.api.services.conversations import ConversationService, build_graph_cache
 from apps.api.settings import Settings
-from packages.ai.runner import GraphRunner
+from packages.ai.runner import GraphRunner, TurnResult
 from packages.ai.tools import default_registry
 from packages.ai.tools.builtin.booking import set_booking_dependencies
 from packages.core.tenancy import TenantContext
@@ -43,6 +44,7 @@ from packages.persistence.repositories.conversations import ConversationReposito
 from packages.persistence.session import SessionFactory
 from packages.providers.llm import LLMProviderSettings, build_llm_adapter
 from packages.providers.observability import build_langfuse_tracer
+from packages.voice.call_metrics import TurnRecord
 
 __all__ = ["VOICE_CHANNEL", "MediaRuntime", "build_runtime"]
 
@@ -74,6 +76,7 @@ class MediaRuntime:
         conversation_id: UUID,
         user_text: str,
         on_interim: Callable[[str], Awaitable[None]] | None = None,
+        record: TurnRecord | None = None,
     ) -> str:
         """One caller utterance in, the agent's spoken reply out.
 
@@ -89,6 +92,10 @@ class MediaRuntime:
         preamble is NOT part of the returned text: it has already been spoken.
         Without the callback it is folded into the reply as before.
 
+        ``record``, when given, is filled with this turn's timings (first
+        token, first reply token, end of generation), tools called, and token
+        usage — the voice metrics row. Timestamps are ``time.monotonic()``.
+
         Errors are surfaced as an empty string rather than raised — the caller
         (:class:`~packages.providers.voice.agent_bridge.VoiceAgentProcessor`)
         turns that into a spoken apology. A raised exception here would end the
@@ -101,6 +108,8 @@ class MediaRuntime:
 
         chunks: list[str] = []
         preamble: list[str] = []
+        result = TurnResult()
+        seen_tools: set[str] = set()
 
         async def flush_preamble() -> None:
             # Spoken at the first event that is NOT part of the preamble —
@@ -122,7 +131,10 @@ class MediaRuntime:
             # tools either way; what changes is how it phrases an answer that
             # has to be *heard* — no bullet lists, no unread reference codes.
             channel=VOICE_CHANNEL,
+            result=result,
         ):
+            if record is not None:
+                _note_event(record, event.type, event.data, seen_tools)
             if event.type == "token" and event.data.get("interim"):
                 if on_interim is None:
                     chunks.append(str(event.data.get("text", "")))
@@ -142,7 +154,27 @@ class MediaRuntime:
 
         if preamble:
             await flush_preamble()
+        if record is not None:
+            record.t_generation_end = time.monotonic()
+            record.graph_latency_ms = result.latency_ms or None
+            record.agent_key = result.agent_key
+            record.finish_reason = result.finish_reason
+            record.outcome = result.outcome
+            if result.usage is not None:
+                record.prompt_tokens = result.usage.prompt_tokens
+                record.completion_tokens = result.usage.completion_tokens
+                record.cached_tokens = result.usage.cached_prompt_tokens
         return "".join(chunks).strip()
+
+    async def withdraw_speculative_turn(
+        self, *, tenant_id: UUID, conversation_id: UUID, user_text: str
+    ) -> None:
+        """A speculative turn missed; take its rows out of the model's view."""
+        await self.conversations.withdraw_speculative_turn(
+            ctx=TenantContext(tenant_id=tenant_id),
+            conversation_id=conversation_id,
+            user_text=user_text,
+        )
 
     async def retract_last_reply(
         self, *, tenant_id: UUID, conversation_id: UUID
@@ -211,6 +243,26 @@ class MediaRuntime:
         # call's last turns are exactly the ones still buffered at shutdown.
         get_tracer().shutdown()
         await self.router.dispose_all()
+
+
+def _note_event(
+    record: TurnRecord, kind: str, data: dict[str, object], seen_tools: set[str]
+) -> None:
+    """Stamp the first-token marks and collect tool names for the metrics row."""
+    if kind == "token" and str(data.get("text") or ""):
+        now = time.monotonic()
+        if record.t_first_token is None:
+            record.t_first_token = now
+        if not data.get("interim") and record.t_first_reply_token is None:
+            record.t_first_reply_token = now
+    elif kind == "tool.started":
+        # Emitted twice per call (when the model streams it, and when it runs);
+        # the call id makes them one.
+        call_id = str(data.get("tool_call_id") or "")
+        if call_id and call_id in seen_tools:
+            return
+        seen_tools.add(call_id)
+        record.tool_names.append(str(data.get("tool_key") or "?"))
 
 
 async def build_runtime(settings: Settings) -> MediaRuntime:

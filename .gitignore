@@ -49,3 +49,7 @@ docker-compose.override.yml
 
 # Dev-server PIDs and logs from tools/dev.sh
 .run/
+
+# Voice latency metrics (turns.csv, per-call event logs). Contains call
+# transcripts, so never committed.
+var/
