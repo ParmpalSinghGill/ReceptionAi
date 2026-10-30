@@ -19,6 +19,12 @@ it explicitly is the point of the subclass:
 * Context window is per model — 1M on V4, 64k on the V3 pair — and is the
   ceiling the budget manager plans against, so it is read from the capability
   record rather than assumed.
+* **V4 thinks by default, and we turn it off.** Left on, every call spends
+  100-300 reasoning tokens before its first word: measured 6 Oct 2026, first
+  token 1.0-2.2s with thinking against 0.6-0.7s without. A booking turn makes
+  up to five calls in sequence (route, tool rounds, reply), and the routing and
+  tool calls are not streamed, so the whole reasoning cost lands on the caller
+  every time. ``thinking=True`` restores it for a deployment that wants it.
 """
 
 from __future__ import annotations
@@ -103,6 +109,10 @@ MODEL_CLASSES: Final[dict[str, str]] = {
 }
 
 
+#: Models that accept the ``thinking`` request field.
+_THINKING_SWITCH_MODELS: Final = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+
+
 class DeepSeekLLMAdapter(OpenAICompatibleLLMAdapter):
     """``LLMPort`` against DeepSeek."""
 
@@ -114,6 +124,7 @@ class DeepSeekLLMAdapter(OpenAICompatibleLLMAdapter):
         base_url: str = DEFAULT_BASE_URL,
         client: httpx.AsyncClient | None = None,
         max_attempts: int = 3,
+        thinking: bool = False,
     ) -> None:
         capabilities = DEEPSEEK_MODELS.get(model)
         if capabilities is None:
@@ -131,6 +142,14 @@ class DeepSeekLLMAdapter(OpenAICompatibleLLMAdapter):
             capabilities=capabilities,
             client=client,
             max_attempts=max_attempts,
+            # Only V4 has the switch. The V3 pair choose by model name instead
+            # (`deepseek-chat` never thinks, `deepseek-reasoner` always does),
+            # so they are sent nothing they did not ask for.
+            extra_body=(
+                {"thinking": {"type": "enabled" if thinking else "disabled"}}
+                if model in _THINKING_SWITCH_MODELS
+                else None
+            ),
         )
 
     @staticmethod

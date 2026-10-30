@@ -366,6 +366,7 @@ class OpenAICompatibleLLMAdapter:
         base_backoff_ms: int = 200,
         max_backoff_ms: int = 4_000,
         connect_timeout_s: float = 5.0,
+        extra_body: Mapping[str, Any] | None = None,
     ) -> None:
         if not str(api_key):
             raise ConfigurationError(
@@ -384,6 +385,9 @@ class OpenAICompatibleLLMAdapter:
         self._base_backoff_ms = base_backoff_ms
         self._max_backoff_ms = max_backoff_ms
         self._connect_timeout_s = connect_timeout_s
+        #: Provider-specific request fields the shared wire format has no name
+        #: for — DeepSeek's ``thinking`` switch is one. Merged into every body.
+        self._extra_body = dict(extra_body or {})
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             # No global timeout here: it is set per request from `timeout_ms`,
@@ -669,6 +673,7 @@ class OpenAICompatibleLLMAdapter:
             "messages": [_encode_message(m) for m in messages],
             "temperature": temperature,
             "stream": stream,
+            **self._extra_body,
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens

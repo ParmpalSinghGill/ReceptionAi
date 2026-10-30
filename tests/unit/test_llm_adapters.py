@@ -416,6 +416,42 @@ async def test_deepseek_cache_hits_are_read_into_usage() -> None:
     assert result.usage.cached_prompt_tokens == 80
 
 
+@pytest.mark.parametrize(
+    ("model", "thinking", "expected"),
+    [
+        ("deepseek-v4-flash", False, {"type": "disabled"}),
+        ("deepseek-v4-flash", True, {"type": "enabled"}),
+        ("deepseek-v4-pro", False, {"type": "disabled"}),
+        ("deepseek-chat", False, None),
+    ],
+)
+async def test_v4_thinking_is_off_unless_asked_for(
+    model: str, thinking: bool, expected: dict | None
+) -> None:
+    """V4 reasons by default, which cost 0.4-1.5s before the first word of
+    every call. Off is the default; V3 models have no switch and get no field.
+    """
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]},
+        )
+
+    adapter = DeepSeekLLMAdapter(
+        api_key="sk-test",
+        model=model,
+        thinking=thinking,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await adapter.chat(messages=[Message(role="user", content="hi")])
+    await adapter.aclose()
+
+    assert sent[0].get("thinking") == expected
+
+
 def test_an_unknown_model_is_refused_rather_than_guessed() -> None:
     """An invented capability record would make the fallback router route on a
     guess."""
